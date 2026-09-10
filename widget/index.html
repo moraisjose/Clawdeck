@@ -10,6 +10,10 @@
 	     overrides win, and gated entirely on @supports, so it is inert on the Edge
 	     widget and on every modern browser. -->
 	<link rel="stylesheet" href="styles/ios10-compat.css" />
+	<!-- The <=3:2 layout blocks, re-gated for a browser that cannot evaluate
+	     max-aspect-ratio. Generated — see widget/tools/gen-ios10-layout.py. Must
+	     come after ios10-compat.css: it corrects gap fallbacks those layouts flip. -->
+	<link rel="stylesheet" href="styles/ios10-layout.css" />
 	<meta name="x-icue-widget-preview" content="resources/preview.png" />
 
 	<meta name="x-icue-property" content="crabdPort" data-label="tr('crabd Port')" data-type="textfield" data-default="'2722'" />

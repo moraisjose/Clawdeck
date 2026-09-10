@@ -135,15 +135,11 @@
 	.card-top > .card-age            { margin-left: auto; }
 	.grid-head > .session-count      { margin-left: auto; }
 
-	/* The one slot where .zone-limits turns into a ROW (sidecrab.css:3520). Not
-	   reachable on the iPad — 768px portrait is already past the 640px ceiling —
-	   but a fallback layer that silently covers only the slots someone happened to
-	   test is how the .week-grid column-gap above got missed in the first place. */
-	@media (max-aspect-ratio: 3/2) and (min-height: 421px) and (max-width: 640px) {
-		.zone-limits > * + * { margin-top: 0; margin-left: var(--space-gap); }
-		.zone-limits > .today,
-		.zone-limits > .sensors.shown { margin-top: 0; }
-	}
+	/* The direction flips that other slots apply to .zone-identity and .zone-limits
+	   are corrected in ios10-layout.css, NOT here. They belong beside the layout
+	   that causes them, and the media query guarding them has to be the rewritten
+	   one: a prelude carrying `max-aspect-ratio` is dead on this device, which is
+	   the whole reason that file exists. */
 }
 
 
