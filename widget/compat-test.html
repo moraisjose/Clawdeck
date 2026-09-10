@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SideCrab — teste de compatibilidade</title>
+<style>
+	:root {
+		--u: 20px;
+		--w: 200px;
+		--accent: #d4553f;
+	}
+	body {
+		margin: 0;
+		padding: 16px;
+		background: #14171c;
+		color: #e8e6e3;
+		font: 16px/1.45 -apple-system, HelveticaNeue, Helvetica, Arial, sans-serif;
+	}
+	h1 { font-size: 22px; margin: 0 0 4px; color: var(--accent); }
+	p.sub { margin: 0 0 16px; color: #9aa0a8; font-size: 13px; }
+	table { border-collapse: collapse; width: 100%; }
+	td { padding: 7px 8px; border-bottom: 1px solid #2a2f37; vertical-align: top; }
+	td.n { color: #cfd4da; }
+	td.v { color: #7d858f; font-size: 12px; width: 34%; }
+	td.r { width: 74px; font-weight: bold; }
+	.pass { color: #4caf72; }
+	.fail { color: #e05a48; }
+	.info { color: #e8a33d; }
+	#env { margin-top: 18px; padding: 10px; background: #1b1f26; font-size: 12px; color: #9aa0a8; word-break: break-all; }
+
+	/* --- alvos de medicao (fora do ecra, mas com layout real) --- */
+	#probes { position: absolute; left: -9999px; top: 0; }
+	#p_var    { width: var(--w); }
+	#p_calc   { width: calc(100px + 50px); }
+	#p_cvar   { width: calc(var(--u) * 10); }   /* o suspeito principal */
+	#p_max    { width: max(50px, 150px); }
+	#p_min    { width: min(150px, 400px); }
+	#p_flex   { display: flex; gap: 40px; }
+	#p_flex > i { display: block; width: 50px; height: 10px; }
+	#p_grid   { display: grid; grid-template-columns: 50px 50px; gap: 40px; }
+	#p_grid > i { display: block; height: 10px; }
+	#p_insbox { position: relative; width: 200px; height: 30px; }
+	#p_inset  { position: absolute; inset: 0; }
+	#p_vmin   { width: 10vmin; }
+</style>
+</head>
+<body>
+
+<h1>SideCrab — compatibilidade</h1>
+<p class="sub">Cada linha mede o valor real aplicado. Verde = funciona neste browser.</p>
+
+<div id="probes">
+	<div id="p_var"></div>
+	<div id="p_calc"></div>
+	<div id="p_cvar"></div>
+	<div id="p_max"></div>
+	<div id="p_min"></div>
+	<div id="p_flex"><i></i><i></i></div>
+	<div id="p_grid"><i></i><i></i></div>
+	<div id="p_insbox"><div id="p_inset"></div></div>
+	<div id="p_vmin"></div>
+</div>
+
+<table id="out"></table>
+<div id="env"></div>
+
+<script>
+/* ES5 apenas: este ficheiro tem de correr onde o widget talvez nao corra. */
+(function () {
+	var rows = [];
+
+	function w(id) {
+		var el = document.getElementById(id);
+		return el ? el.offsetWidth : -1;
+	}
+
+	function add(name, ok, detail) {
+		rows.push({ name: name, ok: ok, detail: detail });
+	}
+
+	/* --- CSS --- */
+	add('var() simples', w('p_var') === 200, w('p_var') + 'px / esperado 200');
+	add('calc() simples', w('p_calc') === 150, w('p_calc') + 'px / esperado 150');
+	add('var() DENTRO de calc()', w('p_cvar') === 200, w('p_cvar') + 'px / esperado 200');
+	add('unidades vmin', w('p_vmin') > 0, w('p_vmin') + 'px');
+	add('max()', w('p_max') === 150, w('p_max') + 'px / esperado 150');
+	add('min()', w('p_min') === 150, w('p_min') + 'px / esperado 150');
+
+	var flexW = w('p_flex') > 0 ? document.getElementById('p_flex').scrollWidth : -1;
+	var fi = document.getElementById('p_flex').getElementsByTagName('i');
+	var flexGap = (fi.length === 2) ? (fi[1].offsetLeft - fi[0].offsetLeft - 50) : -1;
+	add('gap em flexbox', flexGap === 40, 'gap medido ' + flexGap + 'px / esperado 40');
+
+	var gi = document.getElementById('p_grid').getElementsByTagName('i');
+	var gridGap = (gi.length === 2) ? (gi[1].offsetLeft - gi[0].offsetLeft - 50) : -1;
+	add('gap em grid', gridGap === 40, 'gap medido ' + gridGap + 'px / esperado 40');
+
+	add('display: grid', gi.length === 2 && gi[1].offsetLeft > gi[0].offsetLeft,
+		'colunas ' + (gi.length === 2 ? 'lado a lado' : 'indeterminado'));
+	add('inset: 0', w('p_inset') === 200, w('p_inset') + 'px / esperado 200');
+
+	/* --- JS / DOM --- */
+	add('fetch()', typeof window.fetch === 'function', typeof window.fetch);
+	add('Promise', typeof window.Promise === 'function', typeof window.Promise);
+	add('AbortController', typeof window.AbortController !== 'undefined',
+		'ausente e OK — o widget protege-o');
+	add('PointerEvent (gestos)', typeof window.PointerEvent !== 'undefined',
+		'ausente = sem swipe/long-press/pull');
+	add('TouchEvent', typeof window.TouchEvent !== 'undefined', 'alternativa aos gestos');
+	add('CSS.supports', !!(window.CSS && window.CSS.supports), '');
+
+	/* --- render --- */
+	var html = '';
+	for (var i = 0; i < rows.length; i++) {
+		var r = rows[i];
+		var cls = r.ok ? 'pass' : 'fail';
+		var mark = r.ok ? 'OK' : 'FALHA';
+		if (r.name === 'AbortController' || r.name === 'TouchEvent') {
+			if (!r.ok) { cls = 'info'; mark = '—'; }
+		}
+		html += '<tr><td class="n">' + r.name + '</td>' +
+				'<td class="r ' + cls + '">' + mark + '</td>' +
+				'<td class="v">' + r.detail + '</td></tr>';
+	}
+	document.getElementById('out').innerHTML = html;
+
+	document.getElementById('env').innerHTML =
+		'viewport ' + window.innerWidth + ' x ' + window.innerHeight +
+		' &nbsp;·&nbsp; dpr ' + (window.devicePixelRatio || 1) +
+		' &nbsp;·&nbsp; racio ' + (window.innerWidth / window.innerHeight).toFixed(3) +
+		'<br>' + navigator.userAgent;
+})();
+</script>
+
+</body>
+</html>

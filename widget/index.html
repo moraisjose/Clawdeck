@@ -6,6 +6,10 @@
 	<title>tr('SideCrab')</title>
 	<link rel="icon" type="image/svg+xml" href="resources/icon.svg" />
 	<link rel="stylesheet" href="styles/sidecrab.css" />
+	<!-- Legacy-WebKit fallbacks (iPad 4 / iOS 10.3.3). AFTER sidecrab.css so its
+	     overrides win, and gated entirely on @supports, so it is inert on the Edge
+	     widget and on every modern browser. -->
+	<link rel="stylesheet" href="styles/ios10-compat.css" />
 	<meta name="x-icue-widget-preview" content="resources/preview.png" />
 
 	<meta name="x-icue-property" content="crabdPort" data-label="tr('crabd Port')" data-type="textfield" data-default="'2722'" />
@@ -1107,6 +1111,10 @@
 		</div>
 	</div>
 
+	<!-- Synthesises pointer events from touch on a browser with no Pointer Events,
+	     which is what keeps swipe / long-press / two-finger-tap / pull alive on
+	     iOS 10. Self-disabling where PointerEvent exists. MUST precede sidecrab.js. -->
+	<script src="scripts/pointer-shim.js"></script>
 	<script src="scripts/sidecrab.js"></script>
 </body>
 </html>

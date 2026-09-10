@@ -1,0 +1,191 @@
+/* SideCrab — legacy-WebKit compatibility layer (iPad 4 / iOS 10.3.3, Safari 10.1).
+
+   NOTHING IN sidecrab.css IS TOUCHED. This file is loaded after it and is gated
+   entirely on @supports, so it is INERT on the Xeneon Edge widget (QtWebEngine
+   6.9.3 / Chromium 130) and on every modern browser. That is the whole design:
+   `git merge upstream/main` can never conflict with a file upstream does not have.
+
+   Measured on the target device with widget/compat-test.html, iOS 10.3.3 (14G60):
+
+     PASS  var(), calc(), var() INSIDE calc(), vmin, display:grid, fetch, Promise
+     FAIL  gap (flex AND grid), max(), min(), inset, PointerEvent
+
+   So the token system survives intact — every calc(var(--layout-unit) * N) in
+   sidecrab.css computes correctly. Only three CSS features and one DOM API are
+   missing, and each one has an exact pre-2017 equivalent. This file is those
+   equivalents and nothing else; no value here is re-tuned, re-designed or guessed.
+
+   Gestures are restored separately by scripts/pointer-shim.js. */
+
+
+/* =====================================================================
+   1. gap — 58 rules
+   =====================================================================
+
+   Safari shipped flexbox `gap` in 14.1 and the `gap` shorthand for grid in 12.
+   Below that both parse as nothing at all, so every spacing in the panel
+   collapses to zero. That single fact is what "tudo desformatado" was.
+
+   Three different equivalents, because gap has no single one:
+
+     GRID      -> `grid-gap`, the property Safari 10.1 shipped Grid with. Exact:
+                  same axis, same wrapping, same behaviour. No caveats.
+     FLEX      -> a margin on `> * + *`. Adjacent-sibling means no leading or
+                  trailing space is invented, and the container's own box is
+                  never touched — which matters in a layout whose zones are
+                  measured to the pixel. Correct only when the line does not wrap.
+     FLEX WRAP -> a margin on every `> *`. A wrapped line needs spacing on both
+                  axes, and `+ *` cannot see across a line break. The cost is a
+                  trailing margin on the last item of each line. The usual fix is
+                  a negative margin on the container, and it is REFUSED here: a
+                  negative margin changes the container's own box, and these six
+                  containers sit inside zones whose heights are measured. A few
+                  px of slack at one edge of a badge row is the cheaper error.
+
+   The `not (gap: 1px)` test is deliberately the flexbox reading — a browser with
+   grid gap but no flex gap (Safari 12–14) still needs this whole block, and
+   grid-gap is correct there too. */
+
+@supports not (gap: 1px) {
+
+	/* ---- grid containers: exact equivalent ---- */
+	.today-grid                        { grid-gap: calc(var(--layout-unit) * 1.2); }
+	body.limits-two-extras .today-grid { grid-gap: calc(var(--layout-unit) * 3.4); }
+	.cards                             { grid-gap: var(--space-gap); }
+	body.density-compact .cards        { grid-gap: calc(var(--layout-unit) * 1.2); }
+	.week-grid                         { grid-row-gap: calc(var(--layout-unit) * 0.5); }
+
+	/* ---- flex columns: margin-top between siblings ---- */
+	.zone-identity > * + *                              { margin-top: calc(var(--layout-unit) * 2.2); }
+	.zone-limits > * + *                                { margin-top: calc(var(--layout-unit) * 1.9); }
+	.zone-grid > * + *                                  { margin-top: var(--space-gap); }
+	.gauge-extra > * + *                                { margin-top: var(--space-gap); }
+	.today > * + *                                      { margin-top: calc(var(--layout-unit) * 0.9); }
+	.spark-wrap > * + *                                 { margin-top: calc(var(--layout-unit) * 0.6); }
+	.card > * + *                                       { margin-top: calc(var(--layout-unit) * 0.8); }
+	.card-bottom > * + *                                { margin-top: calc(var(--layout-unit) * 0.8); }
+	.card-approval > * + *                              { margin-top: calc(var(--layout-unit) * 0.3); }
+	.card-subs > * + *                                  { margin-top: calc(var(--layout-unit) * 0.3); }
+	.sheet-panel > * + *                                { margin-top: calc(var(--layout-unit) * 2.2); }
+	.sheet[data-mode="burn"] .sheet-burn > * + *        { margin-top: calc(var(--layout-unit) * 1); }
+	.sheet[data-mode="forecast"] .sheet-burn > * + *    { margin-top: calc(var(--layout-unit) * 1); }
+	.sheet[data-mode="host"] .sheet-host > * + *        { margin-top: calc(var(--layout-unit) * 1.6); }
+	.hs-chart > * + *                                   { margin-top: calc(var(--layout-unit) * 0.7); }
+	.burn-models > * + *                                { margin-top: calc(var(--layout-unit) * 0.7); }
+	.sheet[data-mode="timeline"] .sheet-timeline > * + *{ margin-top: calc(var(--layout-unit) * 0.4); }
+	.sheet[data-mode="overflow"] .sheet-timeline > * + *{ margin-top: calc(var(--layout-unit) * 0.4); }
+	.sheet[data-mode="timeline"] .sheet-week > * + *    { margin-top: calc(var(--layout-unit) * 0.8); }
+	.sheet-subs > * + *                                 { margin-top: calc(var(--layout-unit) * 0.5); }
+	.sheet-events > * + *                               { margin-top: calc(var(--layout-unit) * 0.6); }
+	.sheet[data-approval="1"] .sheet-approval-detail > * + * { margin-top: calc(var(--layout-unit) * 0.8); }
+	.sheet[data-continue="1"] .sheet-continue > * + *   { margin-top: calc(var(--layout-unit) * 1); }
+	body.density-compact .card > * + *                  { margin-top: calc(var(--layout-unit) * 0.4); }
+
+	/* ---- flex rows, no wrap: margin-left between siblings ---- */
+	.clock-row > * + *                     { margin-left: calc(var(--layout-unit) * 1); }
+	.moon-chip > * + *                     { margin-left: calc(var(--layout-unit) * 0.6); }
+	.fleet > * + *                         { margin-left: calc(var(--layout-unit) * 3.4); }
+	.fleet-item > * + *                    { margin-left: calc(var(--layout-unit) * 0.9); }
+	.limits-head > * + *                   { margin-left: calc(var(--layout-unit) * 1.5); }
+	.spark > * + *                         { margin-left: calc(var(--layout-unit) * 0.35); }
+	.spark-axis > * + *                    { margin-left: calc(var(--layout-unit) * 1); }
+	.spark-axis-left > * + *               { margin-left: calc(var(--layout-unit) * 0.8); }
+	.spark-labels > * + *                  { margin-left: calc(var(--layout-unit) * 0.35); }
+	body.limits-two-extras .stat > * + *   { margin-left: calc(var(--layout-unit) * 0.8); }
+	.sensors > * + *                       { margin-left: calc(var(--layout-unit) * 2.2); }
+	.sensor > * + *                        { margin-left: calc(var(--layout-unit) * 0.8); }
+	.grid-head > * + *                     { margin-left: calc(var(--layout-unit) * 1.5); }
+	.card-top > * + *                      { margin-left: calc(var(--layout-unit) * 1); }
+	.sub-row > * + *                       { margin-left: calc(var(--layout-unit) * 0.8); }
+	.sheet-head > * + *                    { margin-left: calc(var(--layout-unit) * 2); }
+	.hs-head > * + *                       { margin-left: calc(var(--layout-unit) * 1.4); }
+	.fc-row > * + *                        { margin-left: calc(var(--layout-unit) * 1.4); }
+	.burn-row > * + *                      { margin-left: calc(var(--layout-unit) * 1.4); }
+	.burn-model-row > * + *                { margin-left: calc(var(--layout-unit) * 1.2); }
+	.tl-row > * + *                        { margin-left: calc(var(--layout-unit) * 1); }
+	.event-row > * + *                     { margin-left: calc(var(--layout-unit) * 1); }
+
+	/* ---- flex rows that WRAP: margin on every child, both axes ---- */
+	.card-badges > *                       { margin-right: calc(var(--layout-unit) * 0.7); margin-bottom: calc(var(--layout-unit) * 0.7); }
+	body.density-compact .card-badges > *  { margin-right: calc(var(--layout-unit) * 0.5); margin-bottom: calc(var(--layout-unit) * 0.5); }
+	.sheet-meta > *                        { margin-right: calc(var(--layout-unit) * 1.2); margin-bottom: calc(var(--layout-unit) * 1.2); }
+	.sheet-actions > *                     { margin-right: calc(var(--layout-unit) * 1.8); margin-bottom: calc(var(--layout-unit) * 1.8); }
+	.sheet[data-approval="1"] .sheet-approval-actions > * { margin-right: calc(var(--layout-unit) * 1.8); margin-bottom: calc(var(--layout-unit) * 1.8); }
+	.sheet-continue-btns > *               { margin-right: calc(var(--layout-unit) * 1.4); margin-bottom: calc(var(--layout-unit) * 1.4); }
+
+	/* ---- auto margins the generic rules above would have eaten ----
+
+	   THIS IS THE ONE PLACE THIS FILE CAN BREAK THE LAYOUT rather than repair it.
+	   Four elements in sidecrab.css carry an `auto` margin that is doing real
+	   structural work, and three of them are on the SAME axis a rule above just
+	   set. Two of those three are safe on specificity alone; re-asserting all
+	   four is four lines and removes the need to ever recheck.
+
+	   .today is the load-bearing one: sidecrab.css:990 records that its
+	   margin-top:auto is what bottom-anchors the whole block, and it collides at
+	   IDENTICAL specificity with `.zone-limits > * + *`, so source order alone
+	   decides — and this file is loaded last. Left unhandled, the sensors row
+	   silently leaves the panel, which is the exact failure the upstream comment
+	   at sidecrab.css:317 says was already found and fixed once. */
+	.zone-limits > .today            { margin-top: auto; }
+	.zone-limits > .sensors.shown    { margin-top: auto; }
+	.card-top > .card-age            { margin-left: auto; }
+	.grid-head > .session-count      { margin-left: auto; }
+}
+
+
+/* =====================================================================
+   2. max() / min() — 6 declarations
+   =====================================================================
+
+   CSS math comparison functions are Safari 11.1. Every use here is a clamp in
+   one direction only, which is what min-height / min-width / max-width did
+   before the functions existed — so these are exact, not approximations.
+
+     max(A, B) as a size  ->  size: B  +  min-*: A
+     min(A, B) as a size  ->  size: B  +  max-*: A
+
+   The amplifier was --touch-min. A custom property holds any token sequence and
+   is only validated when it is SUBSTITUTED, so `max(48px, ...)` parsed happily
+   at :root and then made all 18 declarations that read var(--touch-min) invalid
+   at computed-value time. One bad token, 18 dead hit targets — which is why the
+   panel's controls had no size at all.
+
+   Redefining the token is enough on its own: all 18 consumers read
+   var(--touch-min), so one valid value repairs every one of them at once.
+
+   WHAT THIS GIVES UP, stated rather than hidden. Dropping the max() drops the
+   48px floor, so --touch-min becomes 8.4vmin unconditionally and a slot with
+   vmin below 571px would get hit targets under the 48px minimum the Edge glass
+   is built to. This device is not that slot — at 1024x768 vmin is 768 in either
+   orientation, so --layout-unit is 7.68px and 8.4 units resolve to 64.5px, well
+   clear of the floor. Restating the floor per-consumer was tried and removed: it
+   needs a hand-written selector list for a branch nothing here reaches, and a
+   wrong list is a worse bug than the one it guards against. If this file is ever
+   pointed at a genuinely small slot, that list is the work to do. */
+
+@supports not (width: max(1px, 2px)) {
+	:root { --touch-min: calc(var(--layout-unit) * 8.4); }
+
+	.limits-head  { min-height: calc(var(--layout-unit) * 6.7); }
+	.spark-bar    { height: calc(1% * var(--h, 0)); min-height: 3px; }
+	.card-ctx     { height: calc(var(--layout-unit) * 0.32); min-height: 2px; }
+	.sheet-panel  { width: calc(var(--layout-unit) * 135); max-width: 62%; }
+	.brand-badge  { width: calc(var(--layout-unit) * 48); max-width: 100%; }
+}
+
+
+/* =====================================================================
+   3. inset — 3 declarations
+   =====================================================================
+
+   The shorthand is Safari 14.1. The longhands it expands to are as old as CSS
+   positioning, so this is a pure rewrite with no behavioural difference at all.
+   All three are full-bleed overlays (the alert glow, the flash, the week-strip
+   hit target) and each one loses its entire geometry without this. */
+
+@supports not (inset: 0) {
+	.glow,
+	.flash,
+	.week-hit { top: 0; right: 0; bottom: 0; left: 0; }
+}
