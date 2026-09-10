@@ -219,3 +219,62 @@
 	.sheet,
 	.sheet-backdrop { top: 0; right: 0; bottom: 0; left: 0; }
 }
+
+
+/* =====================================================================
+   4. the sheet scrolls as ONE box, not seven
+   =====================================================================
+
+   Not a missing feature — a flexbox behaviour difference, and the only entry in
+   this file that changes how the panel behaves rather than restoring what it
+   already meant.
+
+   Upstream gives each mode its own scroller and lets the panel itself never
+   scroll: seven regions carry `flex: 1 1 auto; min-height: 0; overflow-y: auto`
+   inside a .sheet-panel bounded only by `max-height: 92%`. That is the correct
+   modern pattern, and it needs the flex container to resolve a DEFINITE height
+   for its line. A max-height alone does not give old WebKit one: the container
+   stays indefinite, the flex item never gets a height to scroll within, and the
+   region renders at full content height and spills straight out of the panel —
+   visibly, because .sheet-panel has no overflow of its own, since upstream never
+   needed it to. Reported as content sitting outside the modal, unformatted.
+
+   The fix is to move the scroll up one level: the panel becomes the single
+   scroller and the inner regions go back to their natural height. One scroller
+   is also the better answer on this device for a reason beyond the bug — nested
+   touch scrolling on iOS 10 has no scroll chaining, so an inner region that
+   reaches its end simply stops, with no way to discover that the panel behind it
+   had more to show.
+
+   WHAT IT COSTS: .sheet-head scrolls away with everything else instead of
+   staying pinned. Making it sticky is the obvious repair and is deliberately not
+   done here — position:sticky is Safari 13 and does not exist on this device
+   either, so it would need a third mechanism to fix a cosmetic loss.
+
+   Gated with the gap block (Safari < 14.1) rather than on a narrower query,
+   because a bug has no feature to test for. Safari 11-14 does not need this and
+   gets it anyway; there it is a mild behavioural difference in a modal, not a
+   defect. Chromium 130 on the Edge is untouched, which is the line that matters. */
+
+@supports not (gap: 1px) {
+	.sheet-panel {
+		overflow-y: auto;
+		/* Momentum scrolling. Without it a long timeline drags a pixel at a time,
+		   which on a 9.7" panel reads as the thing being broken. */
+		-webkit-overflow-scrolling: touch;
+	}
+
+	/* The seven inner scrollers stand down. `flex: 0 0 auto` is the point: told to
+	   grow or shrink into a height the container cannot supply, each one resolves
+	   to something wrong — natural height is the only honest answer here. */
+	.sheet-question,
+	.sheet[data-mode="burn"] .sheet-burn,
+	.sheet[data-mode="forecast"] .sheet-burn,
+	.sheet[data-mode="host"] .sheet-host,
+	.sheet[data-mode="timeline"] .sheet-timeline,
+	.sheet[data-mode="overflow"] .sheet-timeline,
+	.sheet-events {
+		flex: 0 0 auto;
+		overflow-y: visible;
+	}
+}
