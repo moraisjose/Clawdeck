@@ -1120,5 +1120,9 @@
 	     iOS 10. Self-disabling where PointerEvent exists. MUST precede sidecrab.js. -->
 	<script src="scripts/pointer-shim.js"></script>
 	<script src="scripts/sidecrab.js"></script>
+	<!-- AFTER sidecrab.js and before its init(), which is deferred to
+	     DOMContentLoaded because the document is still parsing here. Forces compact
+	     density on legacy WebKit through the widget's own densityForced switch. -->
+	<script src="scripts/legacy-density.js"></script>
 </body>
 </html>

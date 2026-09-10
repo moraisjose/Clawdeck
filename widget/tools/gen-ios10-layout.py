@@ -146,8 +146,15 @@ CORRECTIONS = """
 			/* TUNE THESE TWO. Everything else in this block is derived. */
 			--legacy-crab-h: calc(var(--fs-clock) * 1.25);
 			--legacy-band-gap: calc(var(--layout-unit) * 6);
+			/* Row height for the card grid. A BARE length, never calc(): see the
+			   .cards rule for why the serialization of this value decides how many
+			   cards get rendered. */
+			--legacy-card-row: 15vmin;
 			/* The band is the crab plus .zone's own padding, top and bottom. */
 			--legacy-band-h: calc(var(--legacy-crab-h) + var(--space-pad) * 2);
+			/* The header at the touch floor it already carries as a minimum, plus
+			   its 1px border top and bottom, so .cards can be given the remainder. */
+			--legacy-head-h: calc(var(--touch-min) + 2px);
 		}
 
 		/* Restated rather than inherited: this block is the one that has to hold
@@ -186,7 +193,8 @@ CORRECTIONS = """
 		   TO TUNE: change the 1.25 below and nothing else. The viewBox carries ~10
 		   units of empty headroom above the shell and ~6 below the legs, so the
 		   PAINTED animal is about 28 of its 44 units — the box has to run a little
-		   taller than the clock for the crab to read as the same size as it. */
+		   taller than the clock for the crab to read as the same size as it.
+
 		   THE ORDER OF THESE TWO RULES IS A DEPENDENCY, not a preference. The shared
 		   block above sets `.crab-wrap { flex: 1 1 0 }` and says why: flex-basis 0,
 		   NOT auto, because `.crab { width: 100% }` inside an auto-width flex item is
@@ -235,29 +243,47 @@ CORRECTIONS = """
 		   Upstream's rule is that the stylesheet owns both axes and gridCapacity
 		   owns neither; this keeps that bargain instead of working around it.
 
-		   FOUR PLAIN PERCENTAGES, and the form is chosen for how it SERIALIZES, not
-		   for what it computes. trackCount() splits the computed string on
-		   whitespace and counts the pieces, so the answer depends on whether this
-		   engine serializes grid-template-rows as used track sizes or as the value
-		   as written — and I cannot test which on the device. `repeat(4, minmax(...))`
-		   counts as 4 under one and 3 under the other; four `calc(var() * n)` tracks
-		   count as 4 or as 12, because calc() carries spaces. `25% 25% 25% 25%` is
-		   four whitespace-separated tokens carrying a % under BOTH, so the count is
-		   4 either way and the reader's px|fr|% guard is satisfied either way.
+		   A DEFINITE HEIGHT IS THE WHOLE POINT, and the first attempt at this rule
+		   missed it: `overflow-y: auto` scrolls nothing on a box whose height is its
+		   own content. .cards is `flex: 1 1 auto`, so it just grew and overflowed
+		   the zone exactly as before, now with a scrollbar declared on it. It needs
+		   a stated height, and the only unknown between it and the zone is
+		   .grid-head — so that is stated too, at the touch floor it already carries
+		   as a minimum, plus its border. `flex: 0 0 auto` then stops the height
+		   being flexed away again.
 
-		   What it does is what is wanted too: a percentage track against a container
-		   with no definite height behaves as auto, so the rows take their content
-		   here and no card is clipped by its own cell (.card is overflow:hidden). If
-		   a future engine does resolve the height, they become four equal rows that
-		   fill it. Both readings are correct; only the coin-flip is removed. */
+		   AND THE ROWS HAVE TO BE ABLE TO EXCEED IT. The first attempt used four 25%
+		   tracks, which was self-defeating twice over: against an indefinite height
+		   they behave as auto, and against the definite height this rule now gives,
+		   four 25% rows fill the box exactly — nothing overflows, so there is still
+		   nothing to scroll, and every card is squeezed into a quarter of the zone.
+		   Fixed rows overflow, and the overflow is the scroll.
+
+		   THE TRACK FORM IS CHOSEN FOR HOW IT SERIALIZES. trackCount() splits the
+		   computed string on whitespace and counts the pieces (sidecrab.js:2822), so
+		   the answer depends on whether this engine serializes grid-template-rows as
+		   used track sizes or as written — which is untestable from here. Four bare
+		   var() references substitute to `15vmin` x4 before serialization, so:
+		       used      -> "115.2px" x4 -> 4 tracks        -> capacity 16
+		       specified -> "15vmin" x4  -> no px|fr|% ->     GRID_ROWS default 2 -> 8
+		   Both are sane. Anything carrying calc() would have counted 12 pieces under
+		   the second reading and rendered 48 cards onto a 2012 A6X.
+
 		   touch-action carves the vertical axis back out of `.zones { touch-action:
 		   none }`, which upstream declares because nothing in there scrolls — true
 		   until this rule. It is a no-op on the device this file is for (full
 		   touch-action is Safari 13, the same release that brought Pointer Events,
-		   so every browser that needs this file ignores it) and it is what makes the
-		   scroll work on the Safari 12-14 range that also lands in this block. */
-		.cards {
-			grid-template-rows: 25% 25% 25% 25%;
+		   so every browser needing this file ignores it), and it is what makes the
+		   scroll work on the Safari 12-14 range that lands in the same block.
+
+		   BOTH SELECTORS, because density is forced to compact here and upstream's
+		   `body.density-compact .cards` is (0,2,0) — a bare .cards would lose. */
+		.grid-head { height: var(--legacy-head-h); }
+		.cards,
+		body.density-compact .cards {
+			flex: 0 0 auto;
+			height: calc(100% - var(--legacy-head-h) - var(--space-gap));
+			grid-template-rows: var(--legacy-card-row) var(--legacy-card-row) var(--legacy-card-row) var(--legacy-card-row);
 			align-content: start;
 			overflow-y: auto;
 			-webkit-overflow-scrolling: touch;
@@ -277,16 +303,6 @@ CORRECTIONS = """
 		   whole recap is one tap away: .grid-head opens today's timeline. */
 		.session-count { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-		/* ---- give the density toggle back ----
-
-		   The <=3:2 block hides it as a space trim for an 840x696 slot. Compact is
-		   a THIRD grid row (12 cards, not 8) with smaller type and padding, and
-		   gridCapacity() reads both axes off the computed style, so the count
-		   follows the class with nothing else to change. Hiding the only control
-		   that reaches it costs more than the chip's own width does here.
-		   display copied from the history chip's .shown rule (sidecrab.css:1493) —
-		   .head-chip states no display of its own, being a <button>. */
-		.head-chip[data-density] { display: inline-flex; align-items: center; justify-content: center; }
 	}
 	@media (min-height: 421px) and (max-width: 640px) {
 		.zone-limits > * + * { margin-top: 0; margin-left: var(--space-gap); }
@@ -297,5 +313,40 @@ CORRECTIONS = """
 """
 
 ref = ", ".join(str(s) for s, _ in blocks)
-open(OUT, "w", encoding="utf-8").write(HEADER % ref + "\n".join(chunks) + CORRECTIONS)
-print("gen-ios10-layout: %d blocks -> %s" % (len(blocks), os.path.normpath(OUT)))
+out = HEADER % ref + "\n".join(chunks) + CORRECTIONS
+
+# A malformed comment emits VALID-LOOKING but broken CSS: the rules after a stray
+# `*/` are parsed as declarations, dropped, and the browser recovers silently at
+# the next `}`. It cost a round trip once. Never ship it unchecked again.
+n_open, n_close = out.count("/*"), out.count("*/")
+if n_open != n_close:
+    sys.exit("gen-ios10-layout: %d `/*` vs %d `*/` — a comment is unbalanced, "
+             "which would emit broken CSS silently." % (n_open, n_close))
+stripped = re.sub(r"/\*.*?\*/", "", out, flags=re.S)
+if stripped.count("{") != stripped.count("}"):
+    sys.exit("gen-ios10-layout: unbalanced braces outside comments (%d vs %d)."
+             % (stripped.count("{"), stripped.count("}")))
+# Exact rather than heuristic: walk the text and flag a `*/` that closes nothing.
+# That is the precise shape of the bug — a comment closed early, so its remaining
+# prose lands in the stylesheet — and counting alone cannot catch it when a later
+# stray `/*` rebalances the totals.
+depth, i = 0, 0
+while i < len(out) - 1:
+    two = out[i:i + 2]
+    if two == "/*":
+        depth += 1
+        i += 2
+        continue
+    if two == "*/":
+        depth -= 1
+        if depth < 0:
+            line = out.count("\n", 0, i) + 1
+            sys.exit("gen-ios10-layout: `*/` at line %d closes no comment — the "
+                     "prose after it would be emitted as CSS." % line)
+        i += 2
+        continue
+    i += 1
+
+open(OUT, "w", encoding="utf-8").write(out)
+print("gen-ios10-layout: %d blocks, comments and braces balanced -> %s"
+      % (len(blocks), os.path.normpath(OUT)))
