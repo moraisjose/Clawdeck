@@ -212,6 +212,51 @@ CORRECTIONS = """
 		.zone-limits,
 		.zone-grid { height: calc(100% - var(--legacy-band-h) - 1px); }
 
+		/* ---- the card grid scrolls, and renders more to scroll through ----
+
+		   .cards is `flex: 1 1 auto` inside .zone-grid, so even with the zone's own
+		   height now stated, the grid container's height is flex-determined — and
+		   that is not definite enough here for `repeat(2, minmax(0, 1fr))` to divide.
+		   The rows fall back to content height, the second row runs past the zone,
+		   and body{overflow:hidden} takes the bottom off it. The same failure as
+		   .zones, one level down, and it cannot be closed the same way: what sits
+		   above .cards is .grid-head, whose height is its content, so there is no
+		   honest calc() to write.
+
+		   So it scrolls instead — which is the better answer regardless. A fixed 2x4
+		   grid can only ever show 8, and a panel whose job is to answer "what is
+		   waiting on me" should not leave the operator wondering what is off-screen.
+
+		   FOUR EXPLICIT ROWS, NOT grid-auto-rows. gridCapacity() decides how many
+		   cards to render by counting the computed tracks of both axes, and its
+		   reader requires px/fr/% in the string (sidecrab.js:2822) — so
+		   `grid-template-rows: none` plus grid-auto-rows would fall through to its
+		   default of 2 and render 8 cards into a grid with room to scroll 16.
+		   Upstream's rule is that the stylesheet owns both axes and gridCapacity
+		   owns neither; this keeps that bargain instead of working around it.
+
+		   FOUR PLAIN PERCENTAGES, and the form is chosen for how it SERIALIZES, not
+		   for what it computes. trackCount() splits the computed string on
+		   whitespace and counts the pieces, so the answer depends on whether this
+		   engine serializes grid-template-rows as used track sizes or as the value
+		   as written — and I cannot test which on the device. `repeat(4, minmax(...))`
+		   counts as 4 under one and 3 under the other; four `calc(var() * n)` tracks
+		   count as 4 or as 12, because calc() carries spaces. `25% 25% 25% 25%` is
+		   four whitespace-separated tokens carrying a % under BOTH, so the count is
+		   4 either way and the reader's px|fr|% guard is satisfied either way.
+
+		   What it does is what is wanted too: a percentage track against a container
+		   with no definite height behaves as auto, so the rows take their content
+		   here and no card is clipped by its own cell (.card is overflow:hidden). If
+		   a future engine does resolve the height, they become four equal rows that
+		   fill it. Both readings are correct; only the coin-flip is removed. */
+		.cards {
+			grid-template-rows: 25% 25% 25% 25%;
+			align-content: start;
+			overflow-y: auto;
+			-webkit-overflow-scrolling: touch;
+		}
+
 		/* ---- the header stops writing over itself ----
 
 		   The <=3:2 block gives .session-count `white-space: normal; overflow:
