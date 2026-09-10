@@ -75,7 +75,7 @@ from pathlib import Path, PureWindowsPath
 # does NOT - the .icuewidget import is a double-click at the iCUE console - so shipping
 # schema N+1 dead-feeds the on-glass panel until someone stands at the desk.
 SCHEMA_BREAKING = 5
-VERSION = "0.30.3"
+VERSION = "0.30.4"
 
 HOST = "127.0.0.1"
 # 2722 is the production port and the Scheduled Task owns it. CRABD_PORT exists so a
@@ -2951,8 +2951,19 @@ class HookTracker:
                 # Entries arrive oldest first, so head-inserting each one leaves the
                 # ring newest-first - the same order a live run produces.
                 self._note_event(row, kind, ts, persist=False)
-                if self.REPLAY_STATES.get(kind) and ts >= terminal.get(sid, (0.0,))[0]:
-                    terminal[sid] = (ts, self.REPLAY_STATES[kind])
+                mapped = self.REPLAY_STATES.get(kind)
+                # IDLE-a, the replay half. The live path refuses to raise a Notification
+                # that lands on a FINISHED row (it is the CLI's 60 s idle reminder, not a
+                # question); the same evidence is in the history file - a `turn finished`
+                # sitting immediately before - and replay has to read it the same way or
+                # a false alert raised once is re-raised at EVERY restart, forever, on a
+                # session that may never be touched again. Same test as record()'s:
+                # is the state this row would otherwise be restored to `done`.
+                if (mapped == "needs_input"
+                        and terminal.get(sid, (0.0, None))[1] == "done"):
+                    continue
+                if mapped and ts >= terminal.get(sid, (0.0,))[0]:
+                    terminal[sid] = (ts, mapped)
                 elif (kind in self.REPLAY_MOVES
                       and sid in terminal and ts >= terminal[sid][0]):
                     del terminal[sid]

@@ -14,6 +14,45 @@
 > The "Schema 6" section below is retitled in place: its FIELDS are unchanged and live; only
 > the schema NUMBER they ride on is now 5.
 
+## v0.30.4 (2026-09-10 — BEHAVIOUR; schema stays 5, no field added or removed)
+
+crabd `VERSION` → `0.30.4`. v0.30.3 fixed the LIVE half of IDLE-a and left the replay half open.
+This is the other half, and it mattered more.
+
+### 1. THE GAP — a false alert re-raised at every restart, forever
+
+Reported by the operator immediately after v0.30.3 shipped: two cards still alerting, neither
+waiting on anything. Both had a `turn finished` **exactly 60 s** before their `asked a question`;
+both had survived several restarts.
+
+v0.30.3 stops a live `Notification` on a `done` row from raising an alert. It does nothing about
+the ones already written: `asked a question` is in `history.jsonl` **permanently**, and `replay`
+restored it to `needs_input` with no discriminator at all. So a nudge misread once was re-raised on
+every start of the process — on sessions that may never be touched again, and therefore never
+cleared by a later hook either. The live fix could only ever help sessions that were still running.
+
+### 2. THE FIX — replay reads the same evidence the live path does
+
+The history file already carries it: the `turn finished` sits immediately before the question. A
+replayed `asked a question` is skipped when the state the row would otherwise be restored to is
+`done` — the same test `record()` makes, against the same fact.
+
+| Replayed sequence | Restored state |
+|---|---|
+| `turn finished` → `asked a question` | **`done`** — the nudge |
+| `prompt submitted` → `asked a question` | `needs_input` — mid-turn, real |
+| `turn finished` → `asked a question` → `prompt submitted` → `asked a question` | `needs_input` — the later one is real and survives the two before it |
+
+The ring entry is **not** rewritten. The history says what it said at the time; only the state
+derived from it changes.
+
+### 3. THE LESSON, since this is the second pass over the same defect
+
+A behaviour fix that only touches the live path is half a fix whenever the same evidence is
+persisted and replayed. `history.jsonl` is not a log beside the state machine — on every restart it
+*is* the input to it, so any rule the live path applies has to exist on both sides or the file keeps
+re-asserting the old behaviour indefinitely.
+
 ## v0.30.3 (2026-09-10 — BEHAVIOUR; schema stays 5, no field added or removed)
 
 No shape change. What changes is **which `Notification` counts as a question**. crabd `VERSION` →

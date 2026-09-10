@@ -3425,7 +3425,7 @@ class ActionEndpointTests(ServedOverASocket):
         are all additive and none moves it."""
         self.assertEqual(self.state()["schema"], 5)
         self.assertEqual(crabd.SCHEMA_BREAKING, 5)
-        self.assertEqual(crabd.VERSION, "0.30.3")
+        self.assertEqual(crabd.VERSION, "0.30.4")
 
     def test_the_v6_fields_ride_on_schema_5_in_the_served_document(self):
         """The compat contract in ONE test: the fields the deployed v0.5.0 widget has
@@ -6201,7 +6201,7 @@ class HistoryEndpointTests(ServedOverASocket):
 
     def test_state_and_health_are_untouched_by_the_new_route(self):
         self.assertIn("schema", self.state())
-        self.assertEqual(self.client.get("/v1/health").json()["version"], "0.30.3")
+        self.assertEqual(self.client.get("/v1/health").json()["version"], "0.30.4")
 
     def test_the_endpoint_does_not_write_to_the_history_file(self):
         """Read-only by contract. A GET that touched the file would also invalidate its
@@ -9175,9 +9175,36 @@ class ReplayRestoresTerminalStateTests(HistoryTempFile):
         tracker, row, now = self.replayed(["asked a question", "prompt submitted"])
         self.assertIsNone(row["state"])
 
-    def test_a_question_after_a_finish_wins_over_the_finish(self):
+    def test_a_question_after_a_finish_is_replayed_as_the_idle_nudge_it_was(self):
+        """IDLE-a, THE REPLAY HALF. This asserted `needs_input` one version ago, and it
+        was wrong for the same reason the live path was: a question that followed a
+        finish is Claude Code's 60-second idle reminder, not a question.
+
+        Live, v0.30.3 already refuses to raise it. Replay did not, and that is worse than
+        it sounds - the entry is in `history.jsonl` forever, so every restart re-raised
+        the same false alert, on sessions that may never be touched again. Reported by
+        the operator after the live fix shipped: two cards still alerting, both with a
+        `turn finished` exactly 60 s before their question, both surviving restart after
+        restart. The evidence to tell them apart was in the file the whole time."""
         tracker, row, now = self.replayed(["turn finished", "asked a question"])
+        self.assertEqual(row["state"], "done")
+
+    def test_a_question_after_a_PROMPT_is_still_replayed_as_a_question(self):
+        """The real one, and the discriminator: no finish between the prompt and the
+        question means it arrived mid-turn."""
+        tracker, row, now = self.replayed(["prompt submitted", "asked a question"])
         self.assertEqual(row["state"], "needs_input")
+
+    def test_the_nudge_does_not_swallow_a_LATER_real_question(self):
+        """finish -> nudge -> prompt -> question. The last one is real and must survive
+        the two before it."""
+        tracker, row, now = self.replayed(
+            ["turn finished", "asked a question", "prompt submitted", "asked a question"])
+        self.assertEqual(row["state"], "needs_input")
+
+    def test_a_finish_after_a_question_wins_over_the_question(self):
+        tracker, row, now = self.replayed(["asked a question", "turn finished"])
+        self.assertEqual(row["state"], "done")
 
     def test_an_idle_nudge_does_not_undo_a_replayed_finish(self):
         """IDLE-a. The nudge rides the ring like any event, and the undo arm retires a
