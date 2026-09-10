@@ -1080,6 +1080,87 @@ class NoteActivityTests(unittest.TestCase):
                          "Claude needs your permission to use Bash")
 
 
+class SubagentClearsNeedsInputTests(unittest.TestCase):
+    """A SubagentStop past the question stands the card down (DISPATCH-a).
+
+    THE GAP. A dispatcher session parks its own model while its subagents run, so the
+    CLI's 60 s idle Notification fires on a session that is working flat out. The
+    v0.19.0 clearing signal cannot lift it: that reads the newest completed round-trip
+    in the MAIN transcript, and a dispatcher's parent does not round-trip again until
+    the whole batch lands - minutes later. Measured live 2026-09-10 on a 193-subagent
+    run: `needs_input` since 13:11:02 with `lastActivityAt` still moving at 13:15:42.
+
+    A SubagentStop is a Task returning its result INTO the parent's loop, which cannot
+    happen while the parent is the thing being waited on.
+    """
+
+    SID = "s1"
+
+    def setUp(self):
+        self.hooks = crabd.HookTracker()
+        self.NOW = time.time()
+
+    def send(self, event, **extra):
+        payload = {"session_id": self.SID, "hook_event_name": event, "cwd": "C:\\IT"}
+        payload.update(extra)
+        self.hooks.record(payload)
+
+    def ask(self, at=None, message="Claude is waiting for your input"):
+        self.send("Notification", message=message)
+        row = self.hooks.sessions[self.SID]
+        row["since"] = self.NOW - 300 if at is None else at
+        row["at"] = row["since"]
+        return row["since"]
+
+    def row(self):
+        return self.hooks.snapshot()[self.SID]
+
+    def test_a_subagent_stop_past_the_question_stands_the_card_down(self):
+        self.ask()
+        self.send("SubagentStop")
+        self.assertEqual(self.row()["state"], "working")
+        self.assertIsNone(self.row()["question"])
+
+    def test_the_stand_down_writes_its_own_ring_event(self):
+        """NOT note_activity's text: nobody answered anything here, and a timeline that
+        says they did is a lie the operator cannot check."""
+        self.ask()
+        self.send("SubagentStop")
+        texts = [e["text"] for e in self.row()["events"]]
+        self.assertIn(crabd.SUBAGENT_CLEARED_EVENT, texts)
+        self.assertNotIn(crabd.NEEDS_INPUT_CLEARED_EVENT, texts)
+
+    def test_a_subagent_stop_inside_the_grace_leaves_the_question_standing(self):
+        """The subagent that was ALREADY finishing when the question was raised is not
+        evidence about the question - same reasoning as note_activity's grace."""
+        self.ask(at=self.NOW + crabd.NEEDS_INPUT_ACTIVITY_GRACE_SEC)
+        self.send("SubagentStop")
+        self.assertEqual(self.row()["state"], "needs_input")
+
+    def test_a_permission_owned_alert_is_never_stood_down_by_a_subagent(self):
+        """A parallel batch can land a subagent result while one of its siblings sits on
+        a permission dialog. That alert is the broker's to clear, not a subagent's."""
+        self.send("UserPromptSubmit")
+        self.hooks.note_permission(self.SID, "Claude needs your permission to use Bash",
+                                   self.NOW - 300)
+        self.hooks.sessions[self.SID]["since"] = self.NOW - 300
+        self.send("SubagentStop")
+        self.assertEqual(self.row()["state"], "needs_input")
+
+    def test_the_subagent_counters_still_move_when_the_card_stands_down(self):
+        """The stand-down is additive: SubagentStop's own bookkeeping is untouched."""
+        self.ask()
+        self.send("SubagentStop")
+        self.assertEqual(self.row()["subagent_stops"], 1)
+
+    def test_a_subagent_stop_on_a_working_session_changes_nothing(self):
+        self.send("UserPromptSubmit")
+        since = self.row()["since"]
+        self.send("SubagentStop")
+        self.assertEqual(self.row()["state"], "working")
+        self.assertEqual(self.row()["since"], since)
+
+
 # ---------------------------------------------------------------------------- burn
 
 class BurnTests(unittest.TestCase):
@@ -3193,7 +3274,7 @@ class ActionEndpointTests(ServedOverASocket):
         are all additive and none moves it."""
         self.assertEqual(self.state()["schema"], 5)
         self.assertEqual(crabd.SCHEMA_BREAKING, 5)
-        self.assertEqual(crabd.VERSION, "0.30.0")
+        self.assertEqual(crabd.VERSION, "0.30.1")
 
     def test_the_v6_fields_ride_on_schema_5_in_the_served_document(self):
         """The compat contract in ONE test: the fields the deployed v0.5.0 widget has
@@ -5957,7 +6038,7 @@ class HistoryEndpointTests(ServedOverASocket):
 
     def test_state_and_health_are_untouched_by_the_new_route(self):
         self.assertIn("schema", self.state())
-        self.assertEqual(self.client.get("/v1/health").json()["version"], "0.30.0")
+        self.assertEqual(self.client.get("/v1/health").json()["version"], "0.30.1")
 
     def test_the_endpoint_does_not_write_to_the_history_file(self):
         """Read-only by contract. A GET that touched the file would also invalidate its

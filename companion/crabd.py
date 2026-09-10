@@ -75,7 +75,7 @@ from pathlib import Path, PureWindowsPath
 # does NOT - the .icuewidget import is a double-click at the iCUE console - so shipping
 # schema N+1 dead-feeds the on-glass panel until someone stands at the desk.
 SCHEMA_BREAKING = 5
-VERSION = "0.30.0"
+VERSION = "0.30.1"
 
 HOST = "127.0.0.1"
 # 2722 is the production port and the Scheduled Task owns it. CRABD_PORT exists so a
@@ -652,6 +652,30 @@ EXPIRY_POLL_SEC = 30.0
 #     telemetry moving the state machine, and an api_error is evidence of a FAILING
 #     request - the opposite of the block being released.
 NEEDS_INPUT_CLEARED_EVENT = "answered outside the panel"
+# DISPATCH-a (operator-reported, 2026-09-10). THE GAP THE SIGNAL ABOVE CANNOT CLOSE: a
+# DISPATCHER parks its own model while its subagents run, so the CLI's 60 s idle
+# Notification fires on a session that is working flat out. The turn clock above cannot
+# lift it - it reads the newest round-trip in the MAIN transcript, and a dispatcher's
+# parent does not round-trip again until the whole batch lands. Measured live on a
+# 193-subagent run: `needs_input` raised 13:11:02, main-transcript turn clock frozen at
+# 13:10:02, `lastActivityAt` still moving at 13:15:42 - a card reading "waiting on you"
+# with one second of age on it.
+#
+# THE SIGNAL IS SubagentStop, and it is NOT the thing turn_ts excludes. That exclusion is
+# about subagent TRANSCRIPT RECORDS - a background subagent writing its own file while the
+# main session genuinely waits. A SubagentStop hook is the other end of the same Task: the
+# result RETURNING INTO THE PARENT'S LOOP, which cannot happen while the parent is itself
+# the thing being waited on.
+#
+# THE RESIDUAL, stated rather than papered over: a PARALLEL batch can land a subagent
+# result while a sibling tool sits on a permission dialog. `permission_alert` gates that
+# case - a hold the PermissionRequest hook raised is the broker's to clear, never a
+# subagent's. What the gate does NOT cover is an AskUserQuestion sheet standing beside a
+# live batch, because no hook marks one. That alert is stood down early, and the bound on
+# it is the CLI's own re-fire: it repeats the Notification for a standing prompt, which
+# re-raises the card at full strength (record()'s `moved` is False on identical text, so
+# an already-acked card is not re-escalated - see the `moved` block).
+SUBAGENT_CLEARED_EVENT = "subagent returned, alert cleared"
 # The transcript's record timestamps and `since` (crabd's clock at hook receipt) are two
 # clocks on one machine, and the record that CAUSED the question is written just BEFORE
 # the Notification reaches crabd - so the honest ordering already has it behind `since`.
@@ -2071,6 +2095,70 @@ class FileFacts:
         with self._lock:
             return dict(self.agent_labels)
 
+    def refresh(self) -> bool:
+        """Parse whatever is new. Returns True when the file changed."""
+        try:
+            st = self.path.stat()
+        except OSError:
+            return False
+        if st.st_size == self.size and st.st_mtime == self.mtime and self.offset:
+            return False
+        if st.st_size < self.offset:
+            self.reset()  # truncated or rewritten -> full re-read
+        try:
+            with self.path.open("rb") as fh:
+                fh.seek(self.offset)
+                chunk = fh.read()
+                self.offset = fh.tell()
+        except OSError:
+            return False
+        self.size, self.mtime = st.st_size, st.st_mtime
+        data = self.pending + chunk
+        lines = data.split(b"\n")
+        self.pending = lines.pop()  # trailing partial line; completed on the next pass
+        # The lock spans the whole consume run, not each write: a reader must not see a
+        # half-applied file (requests inserted but context_ts not yet moved), and one
+        # acquire per refresh is cheaper than one per line.
+        with self._lock:
+            for raw in lines:
+                if raw.strip():
+                    self._consume(raw)
+        return True
+
+    def usage_records(self) -> dict[str, tuple[float, int, int, int, int, str | None]]:
+        """A COPY of the usage records, taken under the file's own lock - see __init__."""
+        with self._lock:
+            return dict(self.requests)
+
+    def labels(self) -> dict[str, str]:
+        """A COPY of the subagent labels, for the same reason usage_records() copies."""
+        with self._lock:
+            return dict(self.agent_labels)
+
+    def activity_ts(self) -> float:
+        """When this file's SESSION last did something - the clock `_resolve` ages on.
+
+        STALE-a (operator-reported, 2026-09-10). NOT the mtime. Claude Code appends
+        record kinds to a transcript long after the turn that produced it - `ai-title`,
+        `last-prompt`, `atis-latch` - and not one of them carries a `timestamp`. Each
+        still bumps the mtime, so a DEAD session's idle clock was reset by its own
+        metadata and it could hold a `working` card indefinitely. Measured across nine
+        live rows: three had an mtime ahead of their newest dated record, by 12 min,
+        1 h 45 m and 2 h 56 m; the 12-minute one was a session genuinely waiting on the
+        operator, kept out of `idle` by nothing but a title being written.
+
+        `min` and not the bare record clock: a record dated AHEAD of the file it lives in
+        (an NTP step, a transcript copied from another host) must not buy freshness the
+        file itself cannot vouch for - the same clamp note_activity applies for the same
+        reason. And `last_ts` of 0 means crabd has dated NOTHING in this file, so the
+        mtime is all there is: a brand-new transcript, or a shape the parser cannot date,
+        must keep reading as alive rather than be silently retired.
+
+        Deliberately NOT used by `transcript_age` (the continue queue's liveness check),
+        which wants "the FILE moved" and says so in its own comment.
+        """
+        return min(self.mtime, self.last_ts) if self.last_ts else self.mtime
+
     def _consume(self, raw: bytes) -> None:
         """TOTAL by construction (v0.20.0). One unreadable record must cost that record
         and nothing else: this is called from a loop inside scan(), and an exception here
@@ -2425,7 +2513,6 @@ class HookTracker:
     # (CD-07). Keyed on EVENT_TEXT's values because that is what the history file
     # holds - a kind, never a state name. See replay() for why only these two.
     REPLAY_TERMINAL = {EVENT_TEXT["Stop"]: "done", EVENT_TEXT["SessionEnd"]: "gone"}
-
     def __init__(self, history: "HistoryLog | None" = None) -> None:
         self._lock = threading.Lock()
         self.sessions: dict[str, dict] = {}
@@ -2499,6 +2586,17 @@ class HookTracker:
             if event == "SubagentStop":
                 row["stops"].append(now)
                 row["subagent_stops"] += 1
+                # DISPATCH-a. A Task returning into the parent's loop is the parent
+                # advancing, so an idle-Notification alert older than the grace was a
+                # false positive. Written back as a real transition for note_activity's
+                # reason: an overlay would leave the tracker on `needs_input` and the
+                # next question would land pre-silenced. The permission gate is the one
+                # case a subagent must not speak for - see SUBAGENT_CLEARED_EVENT.
+                if (row["state"] == "needs_input"
+                        and not row["permission_alert"]
+                        and now > row["since"] + NEEDS_INPUT_ACTIVITY_GRACE_SEC):
+                    self._stand_down(row, now)
+                    self._note_event(row, SUBAGENT_CLEARED_EVENT, now, session_id)
                 return
 
             mapped = self.STATE_EVENTS.get(event)

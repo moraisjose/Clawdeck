@@ -14,6 +14,71 @@
 > The "Schema 6" section below is retitled in place: its FIELDS are unchanged and live; only
 > the schema NUMBER they ride on is now 5.
 
+## v0.30.1 (2026-09-10 — BEHAVIOUR; schema stays 5, no field added or removed)
+
+No shape change: `schema` stays **5** and no widget import is needed. What changes is, again,
+**when a `needs_input` row stops being one** — v0.19.0 §2 wrote that guarantee down, and this
+extends it to the one session shape it could not reach. crabd `VERSION` → `0.30.1`.
+
+### 1. THE GAP — a DISPATCHER alerts while it is working flat out
+
+Reported by the operator, 2026-09-10, and measured on the reporting run: a session that had
+dispatched **193 subagents** sat on the panel as `needs_input` while every one of them was still
+working. The card read *"Claude is waiting for your input"* with **one second** of age on it.
+
+The cause is a false-positive `Notification`, not a wrong reading of a real one. A dispatcher parks
+its **own** model while its subagents run, so the CLI's 60 s idle notification fires on a main loop
+that is legitimately quiet. Measured on that run:
+
+| Clock | Value |
+|---|---|
+| newest assistant usage record in the MAIN transcript (v0.19.0's turn clock) | `13:10:02` |
+| `Notification` received → `stateSince` | `13:11:02` (exactly 60 s later) |
+| newest record of ANY type in the MAIN transcript | `13:15:24` — still moving |
+| `lastActivityAt` | `13:15:42` |
+
+v0.19.0's clearing signal cannot lift it **by construction**. That signal is a completed round-trip
+in the MAIN transcript, and a dispatcher's parent does not round-trip again until the whole batch
+lands — minutes, sometimes much longer. Meanwhile `lastActivityAt` keeps moving (it is a max over
+main *and* subagent files), so the served row contradicts itself. And `_resolve` returns
+`needs_input` from an early return, before the aging block, so there is no second chance.
+
+### 2. THE SIGNAL — a `SubagentStop` past the question stands the card down
+
+A `SubagentStop` newer than the moment the question was raised (plus the same 5 s grace) now clears
+`needs_input`.
+
+**This is not the thing v0.19.0 §2 excludes.** That exclusion is about subagent *transcript
+records* — a background subagent writing its own file while the main session genuinely waits, which
+says nothing about the question. A `SubagentStop` **hook** is the other end of the same Task: the
+result **returning into the parent's loop**, which cannot happen while the parent is itself the
+thing being waited on.
+
+Like v0.19.0's clear it is a **real transition, not an overlay** — `question` → null, `acked` →
+false, `stateSince` → the SubagentStop, `lastEvent` → `"working"` — for exactly the reason given
+there: an overlay would leave the tracker on `needs_input` and the next question would land
+pre-silenced on an already-escalated card. Its `events` entry is its own text,
+**`"subagent returned, alert cleared"`**, and deliberately *not* v0.19.0's
+`"answered outside the panel"`: nobody answered anything here, and a timeline that claims they did
+is a claim the operator cannot check.
+
+### 3. THE RESIDUAL — stated, not papered over
+
+A **parallel** batch can land a subagent result while a sibling tool sits waiting on the operator.
+Two cases, and only one of them is covered:
+
+- **A permission dialog is gated.** An alert the `PermissionRequest` hook raised carries
+  `permission_alert`, and a subagent never speaks for it — that hold is the broker's to clear. This
+  is what keeps `test_a_subagent_stop_leaves_the_hold_parked` (v0.20.0) true.
+- **An `AskUserQuestion` sheet is NOT gated**, because no hook marks one. Such an alert is stood
+  down early. The bound on it is the CLI's own behaviour: it **re-fires** `Notification` for a
+  standing prompt, which re-raises the card — and on identical question text `moved` is false, so an
+  already-acked card is not re-escalated by the re-fire.
+
+Closing that residual properly needs a marker for a sheet-raised alert, which no hook currently
+provides. It is a narrower failure than the one it replaces: a bounded late alert on a session that
+is demonstrably running, in place of a permanent false one.
+
 ## v0.30.0 (2026-09-04 — ADDITIVE: `limits.tokenSource`; the long-lived limits token; schema stays 5)
 
 crabd `VERSION` → `0.30.0`. One additive member, one new optional file, no wire change on any

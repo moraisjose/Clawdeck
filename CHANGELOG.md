@@ -9,12 +9,23 @@ detail of every additive field and is the source of truth; this file is the shor
 | Component | Version | Notes |
 |---|---|---|
 | widget (`widget/manifest.json`) | 0.28.2 | card type +17% (title 24.5 px, meta 18.4 px at 2560x720), titles wrap to two lines; question pinned at three whole lines; at most two subagent rows; badges keep their chip size. Plus 0.28.1: | idle blink every 8–10 s (was 60–180 s). Plus 0.28.0: | **the finish dance**: shades on and a four-beat shimmy when a session lands `working -> done` after a real turn (20 s+), once per 30 s, never beside a waiting session. Plus 0.27.1: | **0.27.0 rendered blank inside iCUE** (property/function name collision, a parse-time SyntaxError); fixed by renaming the reader. Otherwise 0.27.0: | **Approval Pairing Code** property; `decide` carries the code + `requestId`; unpaired taps are refused locally with a notice; 403/409/429 answers named on the panel |
-| crabd (`companion/crabd.py`) | 0.30.0 | **the gauges stop dying every morning**: an optional long-lived token (`claude setup-token`, stored DPAPI-protected by `Install-SideCrab.ps1 -LimitsToken`) is used whenever the CLI token has expired; `limits.tokenSource` says which answered. Plus 0.29.0: | **SEC-a + WID-a closed**: `decide` requires the pairing code (`~/.sidecrab/panel-token`, minted on first start) and the pending request's `requestId`; `approvals` block in `/v1/state`; `panelToken` diagnostics in `/v1/health` |
+| crabd (`companion/crabd.py`) | 0.30.1 | **a dispatcher stops alerting while it works**: the idle reminder Claude Code fires 60 s after a turn ends is logged as `idle at the prompt`, not raised as a question. Plus 0.30.2: | **a restart stops losing your alerts**, and **a dead session stops reading `working`**: the activity clock is the transcript's own record timestamps, not the file mtime, so the undated metadata Claude Code appends later (`ai-title`, `last-prompt`, `atis-latch`) no longer resets a session's idle clock. Plus 0.30.1: | **a dispatcher stops alerting while it works**: a `SubagentStop` past the question stands a `needs_input` card down, so the CLI's 60 s idle Notification no longer strands a session whose subagents are running. A permission-raised alert is gated out. Plus 0.30.0: | **the gauges stop dying every morning**: an optional long-lived token (`claude setup-token`, stored DPAPI-protected by `Install-SideCrab.ps1 -LimitsToken`) is used whenever the CLI token has expired; `limits.tokenSource` says which answered. Plus 0.29.0: | **SEC-a + WID-a closed**: `decide` requires the pairing code (`~/.sidecrab/panel-token`, minted on first start) and the pending request's `requestId`; `approvals` block in `/v1/state`; `panelToken` diagnostics in `/v1/health` |
 | notifier (`notifier/sidecrab_toast.py`) | 0.20.0 | shared DayLedger with the digest; budget-crossed toast; companion-gone-quiet toast |
 | lighting (`lighting/sidecrab_glow.py`) | parked | ships disabled: the Corsair SDK crashes in every non-interactive console context tested |
 | schema (`/v1/state`) | 5 | marks the last breaking shape; additive fields are feature-detected by presence |
 
 ## Highlights by wave (newest first)
+
+- **0.30.1 crabd (2026-09-10)** - a dispatcher no longer sits on the panel saying it needs you
+  while it is working flat out. A session that farms its work out to subagents parks its own model,
+  so Claude Code's 60-second idle notification fires on a main loop that is legitimately quiet - and
+  v0.19.0's clearing signal (a completed round-trip in the main transcript) cannot lift it, because
+  the parent will not round-trip again until the whole batch lands. Measured on the reporting run:
+  193 subagents, the card alerting with one second of age on it. A `SubagentStop` newer than the
+  question now stands the card down - a Task returning into the parent's loop is the parent
+  advancing, which cannot happen while the parent is what is being waited on. An alert the
+  `PermissionRequest` hook raised is gated out and stays the broker's to clear. See
+  `docs/STATE-CONTRACT.md` v0.30.1 for the residual this does not close.
 
 - **0.30.0 crabd (2026-09-04)** - "token expired" every morning, fixed. The CLI's token lives
   ~6 h and only a terminal `claude` refreshes the file, so `claude setup-token` +
