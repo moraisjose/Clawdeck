@@ -56,6 +56,7 @@ import os
 import re
 import secrets
 import subprocess
+import sqlite3
 import sys
 import threading
 import time
@@ -75,7 +76,7 @@ from pathlib import Path, PureWindowsPath
 # does NOT - the .icuewidget import is a double-click at the iCUE console - so shipping
 # schema N+1 dead-feeds the on-glass panel until someone stands at the desk.
 SCHEMA_BREAKING = 5
-VERSION = "0.30.4"
+VERSION = "0.31.0"
 
 HOST = "127.0.0.1"
 # 2722 is the production port and the Scheduled Task owns it. CRABD_PORT exists so a
@@ -2363,6 +2364,241 @@ class FileFacts:
     def agent_id(self) -> str:
         stem = self.path.stem
         return stem[len("agent-"):] if stem.startswith("agent-") else stem
+
+
+# ------------------------------------------------------- OpenCode (v0.31.0, OC-a)
+# The operator runs a SECOND agent on the same desk, and the panel could not see it.
+# OpenCode keeps everything in ONE SQLite database rather than a file per session, so
+# this reader has nothing in common with TranscriptStore beyond the shape it returns.
+#
+# WHY THE DATABASE AND NOT THE CLI. `opencode stats` exists and answers the usage half
+# of this - but it renders ASCII tables for humans and MEASURED 1.49 s per run on the
+# reporting machine, against 0.01 ms for the windowed query below on the same data. At
+# a 3 s poll that is not a trade, it is a non-starter. `opencode serve` would mean the
+# panel silently going blank whenever the operator is not running a server.
+#
+# READ-ONLY, AND THAT IS LOAD-BEARING. The file measured 502 MB with WAL enabled and
+# another process writing to it. The connection is opened `mode=ro` AND set
+# `query_only`, which is belt and braces on purpose: mode=ro is a URI the caller could
+# lose in a refactor, query_only fails the statement itself. crabd must never be the
+# reason an operator's OpenCode history is damaged.
+#
+# THE SCHEMA IS INTERNAL. Measured on OpenCode 1.18.30; it is not a documented contract
+# and an upgrade may move it. Every column this reads is checked for presence first and
+# a missing one costs its own field, never the feed - the same rule the rest of crabd
+# applies to an absent source: absence is an answer, not an error.
+OPENCODE_DB = Path(os.environ.get("CRABD_OPENCODE_DB")
+                   or (Path.home() / ".local" / "share" / "opencode" / "opencode.db"))
+OPENCODE_CLIENT = "opencode"
+CLAUDE_CLIENT = "claude-code"
+OPENCODE_TIMEOUT_SEC = 2.0
+OPENCODE_TITLE_MAX = TITLE_MAX
+
+
+class OpenCodeStore:
+    """OpenCode's session database, read-only. -> rows shaped for the served card.
+
+    Two questions, deliberately two methods: `sessions` is the card list and runs on
+    every build; `usage` is the stats block. They share a connection helper and nothing
+    else, so a schema change that costs one cannot silently empty the other.
+    """
+
+    def __init__(self, path: "Path | None" = None) -> None:
+        self.path = Path(path) if path is not None else OPENCODE_DB
+        # Logged ONCE per process, not per poll: an operator without OpenCode installed
+        # is the common case and must cost nothing, not a line every three seconds.
+        self._complained = False
+
+    # ------------------------------------------------------------------ plumbing
+    def _connect(self):
+        """A read-only connection, or None. None is the ANSWER for an operator who has
+        never installed OpenCode - by far the commonest case - so it is not logged as a
+        failure and the caller renders absence rather than an error."""
+        if not self.path.exists():
+            return None
+        try:
+            con = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True,
+                                  timeout=OPENCODE_TIMEOUT_SEC)
+            con.execute("PRAGMA query_only = 1")
+            return con
+        except Exception as exc:   # noqa: BLE001 - a corrupt/locked db is not fatal here
+            if not self._complained:
+                self._complained = True
+                print(f"crabd: OpenCode db unreadable ({type(exc).__name__}); "
+                      f"serving no OpenCode data", file=sys.stderr, flush=True)
+            return None
+
+    @staticmethod
+    def _columns(con, table: str) -> set:
+        try:
+            return {row[1] for row in con.execute(f"PRAGMA table_info({table})")}
+        except Exception:   # noqa: BLE001
+            return set()
+
+    @staticmethod
+    def _model(blob) -> "str | None":
+        """`model` is a JSON object; the card wants one string. The PROVIDER is part of
+        the identity - the operator's own db carries `openai/gpt-5.6-terra` beside
+        `openrouter/openai/gpt-5.6-terra` - so it is kept rather than dropped."""
+        if not isinstance(blob, str) or not blob:
+            return None
+        try:
+            obj = json.loads(blob)
+        except Exception:   # noqa: BLE001
+            return None
+        if not isinstance(obj, dict):
+            return None
+        ident = obj.get("id") or obj.get("modelID")
+        provider = obj.get("providerID") or obj.get("provider")
+        if not isinstance(ident, str) or not ident:
+            return None
+        return f"{provider}/{ident}" if isinstance(provider, str) and provider else ident
+
+    # ------------------------------------------------------------------- sessions
+    def sessions(self, now: float) -> list:
+        """Cards for sessions inside the same window the Claude rows use.
+
+        CHILDREN FOLD INTO THEIR PARENT. Measured on the operator's db: 73 of 103 rows
+        were children, and one day held 59 sessions of which 57 were children. Served
+        flat, a single run would put 57 cards on the glass. A child also carries its
+        parent's LIVENESS - the parent's own clock stops while its children work, which
+        is the Claude dispatcher's shape and gets the Claude dispatcher's answer.
+
+        An ORPHAN - a child whose parent is not in the window - is served on its own
+        rather than folded into nothing and dropped.
+        """
+        con = self._connect()
+        if con is None:
+            return []
+        try:
+            cols = self._columns(con, "session")
+            if not {"id", "time_updated"} <= cols:
+                return []
+            wanted = ["id", "parent_id", "title", "directory", "model", "agent",
+                      "time_updated", "tokens_input", "tokens_output",
+                      "tokens_cache_read", "tokens_cache_write", "cost"]
+            have = [c for c in wanted if c in cols]
+            cut = (now - GONE_AFTER_SEC) * 1000.0
+            rows = con.execute(
+                f"select {', '.join(have)} from session where time_updated > ?",
+                (cut,)).fetchall()
+        except Exception as exc:   # noqa: BLE001
+            if not self._complained:
+                self._complained = True
+                print(f"crabd: OpenCode session read failed ({type(exc).__name__}); "
+                      f"serving no OpenCode sessions", file=sys.stderr, flush=True)
+            return []
+        finally:
+            con.close()
+
+        by_id = {}
+        for row in rows:
+            rec = dict(zip(have, row))
+            rec.setdefault("parent_id", None)
+            by_id[rec["id"]] = rec
+
+        out = []
+        for rec in by_id.values():
+            parent = rec.get("parent_id")
+            if parent and parent in by_id:
+                continue          # folded below, into a parent that is actually here
+            activity = (rec.get("time_updated") or 0) / 1000.0
+            kids = 0
+            for other in by_id.values():
+                if other.get("parent_id") == rec["id"]:
+                    kids += 1
+                    activity = max(activity, (other.get("time_updated") or 0) / 1000.0)
+            out.append({
+                "id": rec["id"],
+                "title": _trim(rec.get("title"), OPENCODE_TITLE_MAX) or None,
+                "cwd": rec.get("directory") or None,
+                "model": self._model(rec.get("model")),
+                "agent": rec.get("agent") or None,
+                "activity": activity,
+                "subagents": kids,
+                "tokens": {
+                    "input": rec.get("tokens_input") or 0,
+                    "output": rec.get("tokens_output") or 0,
+                    "cacheRead": rec.get("tokens_cache_read") or 0,
+                    "cacheWrite": rec.get("tokens_cache_write") or 0,
+                },
+                "costUSD": rec.get("cost") if isinstance(rec.get("cost"), (int, float))
+                           else None,
+            })
+        out.sort(key=lambda r: r["activity"], reverse=True)
+        return out
+
+    # ---------------------------------------------------------------------- usage
+    def usage(self, now: float) -> "dict | None":
+        """The `opencode` stats block, or None when there is no database to read.
+
+        None and a ZERO day are deliberately different answers: None means OpenCode is
+        not installed and the panel shows nothing at all, while a day with no messages
+        in it is a real reading and renders as one. The panel cannot tell "no data" from
+        "no work" if both collapse to the same shape.
+
+        Bucketed at LOCAL MIDNIGHT, the same cut `burn.today` uses. The two numbers sit
+        beside each other on the glass, and a different boundary would make them
+        incomparable while looking comparable - the worst kind of wrong.
+        """
+        con = self._connect()
+        if con is None:
+            return None
+        midnight = _local_midnight(now)
+        totals = {"inputTokens": 0, "outputTokens": 0, "cacheReadTokens": 0,
+                  "cacheCreationTokens": 0, "messages": 0}
+        by_model: dict = {}
+        cost = 0.0
+        try:
+            if "data" not in self._columns(con, "message"):
+                return None
+            rows = con.execute(
+                "select data from message where time_created > ?",
+                (midnight * 1000.0,)).fetchall()
+        except Exception as exc:   # noqa: BLE001
+            if not self._complained:
+                self._complained = True
+                print(f"crabd: OpenCode usage read failed ({type(exc).__name__}); "
+                      f"serving no OpenCode usage", file=sys.stderr, flush=True)
+            return None
+        finally:
+            con.close()
+
+        for (blob,) in rows:
+            try:
+                doc = json.loads(blob)
+            except Exception:   # noqa: BLE001 - one torn row is not the day
+                continue
+            if not isinstance(doc, dict) or doc.get("role") != "assistant":
+                continue
+            tok = doc.get("tokens")
+            if not isinstance(tok, dict):
+                continue
+            cache = tok.get("cache") if isinstance(tok.get("cache"), dict) else {}
+            out = _as_count(tok.get("output"))
+            totals["outputTokens"] += out
+            totals["inputTokens"] += _as_count(tok.get("input"))
+            totals["cacheReadTokens"] += _as_count(cache.get("read"))
+            totals["cacheCreationTokens"] += _as_count(cache.get("write"))
+            totals["messages"] += 1
+            if isinstance(doc.get("cost"), (int, float)):
+                cost += float(doc["cost"])
+            ident = doc.get("modelID")
+            provider = doc.get("providerID")
+            if isinstance(ident, str) and ident:
+                label = (f"{provider}/{ident}"
+                         if isinstance(provider, str) and provider else ident)
+                by_model[label] = by_model.get(label, 0) + out
+
+        ranked = sorted(by_model.items(), key=lambda kv: kv[1], reverse=True)
+        return {
+            "today": totals,
+            "byModel": [{"model": m, "outputTokens": n} for m, n in ranked],
+            # A real 0.0, not None: OpenCode's own db carried $0.00 on every
+            # recent session (a subscription proxy) beside a $4.36 lifetime total, so
+            # zero cost is the NORMAL reading here and must not read as "unknown".
+            "costUSD": round(cost, 6),
+        }
 
 
 class TranscriptStore:
@@ -5325,9 +5561,15 @@ class StateBuilder:
                  continues: "ContinueQueue | None" = None,
                  permissions: "PermissionBroker | None" = None,
                  host: "HostSampler | None" = None,
-                 models: "ModelCatalog | None" = None) -> None:
+                 models: "ModelCatalog | None" = None,
+                 opencode: "OpenCodeStore | None" = None) -> None:
         self.store = store
         self.hooks = hooks
+        # OC-a (v0.31.0). OPTIONAL for the reason every other reader here is: a unit
+        # test that does not pass one gets a builder that has never heard of OpenCode,
+        # and no test can reach the operator's real 500 MB database by forgetting a
+        # patch. main() attaches the real one.
+        self.opencode = opencode
         self.limits = limits
         self.recap = recap
         self.fleet = fleet
@@ -5564,7 +5806,11 @@ class StateBuilder:
         sessions = self._sessions(per_session, hook_rows, session_output, now)
         # The tracker owns the history file but only the builder reads transcripts, so
         # the title a history line carries comes from here, one pass behind at worst.
+        # OpenCode rows are deliberately NOT offered to it: the tracker's titles exist to
+        # label HOOK history, and no hook will ever name an OpenCode session.
         self.hooks.note_titles({row["id"]: row["title"] for row in sessions})
+        sessions.extend(self._opencode_sessions(now))
+        sessions.sort(key=self._session_order)
         if self.recap:
             self.recap.submit(*self._recap_inputs(hook_rows, now))
 
@@ -5575,6 +5821,13 @@ class StateBuilder:
                       "hooksSeen": self.hooks.count},
             "limits": limits,
             "burn": burn,
+            # OC-a, additive and deliberately BESIDE `burn` rather than inside it. The
+            # limit gauges measure the operator's Anthropic account and `burn` sits under
+            # them; folding another agent's tokens into that total would read as if the
+            # same account were being spent. null = no OpenCode database at all (it is
+            # not installed); a day with no work in it is a real reading and serves
+            # zeroes, and the panel cannot tell those apart if both collapse to one shape.
+            "opencode": self.opencode.usage(now) if self.opencode else None,
             "sessions": sessions,
             # `active` in here is the EFFECTIVE answer since v0.23.0 - schedule with the
             # operator's panel override applied. Every consumer reads it and none of them
@@ -5765,8 +6018,17 @@ class StateBuilder:
         return ({"today": today, "hourly": hourly, "daily": daily, "byModel": by_model},
                 per_session_out)
 
+    # The panel's reading order, and the ONE definition of it. OpenCode rows are
+    # merged into the same array after _sessions has run, so this has to be reachable
+    # from both sides: a second copy beside this one is a second thing to keep in step.
+    SESSION_ORDER = {"needs_input": 0, "working": 1, "done": 2, "idle": 3}
+
+    @classmethod
+    def _session_order(cls, row: dict):
+        return (cls.SESSION_ORDER.get(row["state"], 9),
+                -_parse_ts(row["lastActivityAt"]))
+
     def _sessions(self, per_session, hook_rows, session_output, now):
-        order = {"needs_input": 0, "working": 1, "done": 2, "idle": 3}
         rows = []
         for sid, info in per_session.items():
             hook = hook_rows.get(sid)
@@ -5796,6 +6058,10 @@ class StateBuilder:
                 title_source = "cwd" if derived else None
             rows.append({
                 "id": sid,
+                # OC-a, additive: WHICH agent this card is. Named on the Claude rows
+                # too, not only on the newcomer - a card with no marking is ambiguous
+                # to anyone who has not memorised which agent is the default.
+                "client": CLAUDE_CLIENT,
                 "title": title,
                 "titleSource": title_source,
                 "cwd": cwd,
@@ -5839,7 +6105,67 @@ class StateBuilder:
                 "queuedContinue": (self.continues.entry(sid, now)
                                    if self.continues else None),
             })
-        rows.sort(key=lambda r: (order.get(r["state"], 9), -_parse_ts(r["lastActivityAt"])))
+        rows.sort(key=self._session_order)
+        return rows
+
+    def _opencode_sessions(self, now: float) -> list:
+        """OC-a. OpenCode rows in the served shape, or [] when there is no db.
+
+        Deliberately a SEPARATE pass rather than a branch inside _sessions: that method
+        reads hook rows, transcripts, the permission broker and the continue queue, and
+        an OpenCode row has none of those. Threading a second source through it would put
+        a `if this is OpenCode` guard on every one of those lookups.
+
+        WHAT AN OPENCODE CARD CANNOT HAVE, and why each absence is honest rather than
+        missing work: no `needs_input`, because no hook exists to raise one and inventing
+        the panel's loudest signal would make it mean two different things; no
+        pendingPermission or queuedContinue, because both are answered over a hook
+        channel OpenCode does not have; no context bar, because the db carries per-session
+        token totals but not the live window fill.
+        """
+        if not self.opencode:
+            return []
+        rows = []
+        for rec in self.opencode.sessions(now):
+            state, since = self._resolve(None, 0.0, rec["activity"], now)
+            if state == "gone":
+                continue
+            cwd = rec.get("cwd")
+            # The same cached reader the Claude rows use - an OpenCode cwd is a working
+            # tree like any other, and a second git path would be a second cache to warm.
+            repo, branch = self.git.get(cwd) if cwd else (None, None)
+            title = rec.get("title") or (_cwd_title(cwd) if cwd else None) \
+                or rec["id"][:8]
+            rows.append({
+                "id": rec["id"],
+                "client": OPENCODE_CLIENT,
+                "title": title,
+                "titleSource": None if rec.get("title") else ("cwd" if cwd else None),
+                "cwd": cwd,
+                "repo": repo,
+                "branch": branch,
+                "state": state,
+                "stateSince": _utc_iso(since),
+                "lastActivityAt": _utc_iso(rec["activity"]),
+                "lastEvent": self._implied_event(state),
+                "model": rec.get("model"),
+                "speed": None,
+                # `running` is 0 rather than a guess: the db says a child EXISTS and when
+                # it last wrote, never whether it is still running. Claiming otherwise
+                # would put a moving count on a card that cannot support one.
+                "subagents": {"running": 0, "total": rec.get("subagents") or 0},
+                "todayOutputTokens": (rec.get("tokens") or {}).get("output") or 0,
+                "question": None,
+                "turnStartedAt": None,
+                "acked": False,
+                "subagentDetail": [],
+                "events": [],
+                "contextTokens": None,
+                "contextSource": None,
+                "contextWindowTokens": None,
+                "pendingPermission": None,
+                "queuedContinue": None,
+            })
         return rows
 
     def _context(self, sid: str, info: dict, now: float) -> dict:
@@ -7260,7 +7586,7 @@ def main() -> int:
     builder = StateBuilder(TranscriptStore(PROJECTS_DIR), hooks,
                            LimitsReader(), started, UserConfig(), recap, fleet,
                            history, statusline, otlp, continues, permissions,
-                           models=ModelCatalog())
+                           models=ModelCatalog(), opencode=OpenCodeStore())
     holder["builder"] = builder
     # v0.29.0: the pairing code is minted on first start and lives beside config.json.
     # Attached to the builder (like the broker) so a test double can carry its own.

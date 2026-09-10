@@ -14,6 +14,83 @@
 > The "Schema 6" section below is retitled in place: its FIELDS are unchanged and live; only
 > the schema NUMBER they ride on is now 5.
 
+## v0.31.0 (2026-09-10 — ADDITIVE: `client` per session + a top-level `opencode`; schema stays 5)
+
+crabd `VERSION` → `0.31.0`. The panel shows a SECOND agent. Two additive members, no shape
+change, no widget import required — an older widget ignores both and renders exactly as it does
+today.
+
+### 1. `client` on every session row
+
+`"claude-code"` or `"opencode"`. Present on **both** kinds, not only on the newcomer: a card with
+no marking is ambiguous to anyone who has not memorised which agent is the default.
+
+Widget reading, and it is three different answers to three inputs:
+
+| `client` | Glyph |
+|---|---|
+| absent | the crab — a crabd older than this serves no member and on that feed every session **is** Claude |
+| known | that client's own mark |
+| unknown string | **none** — a future crabd may serve a third client; drawing it as a crab is a confident lie |
+
+### 2. `opencode` — a top-level block BESIDE `burn`
+
+```jsonc
+"opencode": {                      // null when there is no OpenCode database at all
+  "today":   { "inputTokens": …, "outputTokens": …, "cacheReadTokens": …,
+               "cacheCreationTokens": …, "messages": … },
+  "byModel": [ { "model": "litellm/kimi-k3", "outputTokens": … } ],
+  "costUSD": 0.0
+}
+```
+
+**Deliberately not folded into `burn`.** The limit gauges directly above measure the operator's
+Anthropic account and `burn` is that account being spent; one merged total would read as if the
+same account were being spent by both. `today` is bucketed at **local midnight**, the same cut
+`burn.today` uses — the two sit side by side on the glass and a different boundary would make them
+incomparable while looking comparable.
+
+**`null` and a zeroed `today` are different answers**: null means OpenCode is not installed, zeroes
+mean a real day with no work in it. Any consumer can tell. The *panel* collapses them to "no line",
+because a permanent `0 out` is noise across a room — but the distinction stays on the wire.
+
+### 3. Where the data comes from, and why not the CLI
+
+OpenCode keeps everything in ONE SQLite database (`~/.local/share/opencode/opencode.db`, override
+with `CRABD_OPENCODE_DB`), not a file per session. Measured on the reporting machine, **505 MB with
+WAL and a live writer**.
+
+| Source | Measured |
+|---|---|
+| `sqlite3` read-only, windowed query | **4 ms** sessions, **20 ms** usage |
+| `opencode stats` subprocess | **1 490 ms**, and ASCII tables meant for humans |
+| `opencode serve` | needs a server the operator may not be running |
+
+The connection is opened `mode=ro` **and** set `PRAGMA query_only` — belt and braces on purpose:
+`mode=ro` is a URI a refactor could lose, `query_only` fails the statement itself. Verified against
+the real 505 MB file: size and mtime unchanged across both reads. crabd must never be the reason an
+operator's OpenCode history is damaged.
+
+### 4. What an OpenCode card CANNOT have
+
+The schema is **internal** to OpenCode — measured on 1.18.30, not a documented contract, free to
+move on any upgrade. Every column is presence-checked and a missing one costs its own field, never
+the feed.
+
+- **Never `needs_input`.** No hook exists to raise one, and inventing the panel's loudest signal
+  would make it mean two different things.
+- **No `pendingPermission` / `queuedContinue`.** Both are answered over a hook channel OpenCode
+  does not have.
+- **No context bar.** The db carries per-session token totals but not the live window fill.
+- **`subagents.running` is always 0.** The db says a child exists and when it last wrote, never
+  whether it is still running. A child's write DOES carry the parent's liveness, which is how a
+  dispatcher-shaped OpenCode run stays alive on the glass.
+
+Children fold into the parent card. Measured on the reporting db: **73 of 103** sessions were
+children, and one day held 59 sessions of which 57 were children — served flat, a single run puts
+57 cards on the glass. An orphan (parent outside the window) is served on its own rather than
+folded into nothing and dropped.
+
 ## v0.30.4 (2026-09-10 — BEHAVIOUR; schema stays 5, no field added or removed)
 
 crabd `VERSION` → `0.30.4`. v0.30.3 fixed the LIVE half of IDLE-a and left the replay half open.

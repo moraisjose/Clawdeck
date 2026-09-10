@@ -1012,6 +1012,107 @@ function logLine(msg) {
 	if (window.console && window.console.log) window.console.log('[sidecrab] ' + msg);
 }
 
+/* ------------------------------------------------------------- the client glyph */
+
+/* OC-a. WHICH AGENT a card belongs to, as a tiny pixel mark beside the state dot.
+   The panel now shows two different agents on one grid and a card that does not say
+   which it is forces the operator to read the model string to find out — across a
+   room, at card size, that is not a signal at all.
+
+   Drawn as <rect>s on the SAME 8x8 grid as each other, in the crab's own idiom
+   (shape-rendering: crispEdges, integer cells). One grid rather than one viewBox per
+   mark, so the two line up in the card row instead of each floating in its own box. */
+var CLIENT_GLYPH_BOX = 8;
+var CLIENT_GLYPHS = {
+	/* The crab, reduced until it survives 8 cells: a wide body, two claws held out at
+	   the sides, two legs. At this size the SILHOUETTE is the whole recognition — the
+	   eyes and the accessories that carry the big crab's mood do not survive, and
+	   faking them would just muddy the outline. */
+	'claude-code':
+		'<rect x="2" y="2" width="4" height="3"/>' +
+		'<rect x="0" y="3" width="2" height="1"/>' +
+		'<rect x="6" y="3" width="2" height="1"/>' +
+		'<rect x="2" y="5" width="1" height="2"/>' +
+		'<rect x="5" y="5" width="1" height="2"/>',
+	/* A terminal prompt: a chevron and a caret rule. Chosen to contrast on the axis
+	   that survives shrinking — the crab is solid, wide and horizontal, this is open,
+	   angular and diagonal. Two blobs of similar mass would be indistinguishable at
+	   the size that matters. */
+	opencode:
+		'<rect x="1" y="1" width="2" height="1"/>' +
+		'<rect x="3" y="2" width="2" height="1"/>' +
+		'<rect x="5" y="3" width="2" height="2"/>' +
+		'<rect x="3" y="5" width="2" height="1"/>' +
+		'<rect x="1" y="6" width="2" height="1"/>'
+};
+
+/* -> the glyph key for a row, or null for "draw no mark".
+
+   THREE inputs, three DIFFERENT answers, and the difference is the point:
+
+     absent   -> 'claude-code'. A crabd older than OC-a serves no `client` member at
+                 all, and on that feed every session IS a Claude session. Marking
+                 those cards unknown would make a widget upgrade look like a
+                 regression on a companion the operator has not touched.
+     known    -> that client's own glyph.
+     unknown  -> null. A future crabd may serve a third client this build has never
+                 heard of. Drawing it as a crab is a confident lie; the card still
+                 carries its title, model and state without a mark. Same instinct as
+                 the rest of the panel: absence beats a wrong answer. */
+function clientKind(s) {
+	var raw = s && s.client;
+	if (raw === undefined || raw === null || raw === '') return 'claude-code';
+	if (typeof raw !== 'string') return null;
+	return Object.prototype.hasOwnProperty.call(CLIENT_GLYPHS, raw) ? raw : null;
+}
+
+/* The mark as an <svg>, or null. Built with innerHTML on a namespaced element
+   because createElementNS + one node per rect costs six nodes per card per render on
+   a 2012 A6X, and the markup is a constant this file owns — no feed value reaches it. */
+function clientGlyphEl(s) {
+	var kind = clientKind(s);
+	if (!kind) return null;
+	var box = CLIENT_GLYPH_BOX;
+	var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+	svg.setAttribute('class', 'client-glyph');
+	svg.setAttribute('viewBox', '0 0 ' + box + ' ' + box);
+	svg.setAttribute('shape-rendering', 'crispEdges');
+	svg.setAttribute('data-client', kind);
+	svg.setAttribute('role', 'img');
+	svg.setAttribute('aria-label', kind === 'opencode' ? 'OpenCode session'
+		: 'Claude Code session');
+	svg.innerHTML = CLIENT_GLYPHS[kind];
+	return svg;
+}
+
+/* -> the OpenCode stats line, or null for "render nothing".
+
+   HIDDEN ON TWO DIFFERENT INPUTS, deliberately. The feed keeps them apart - `opencode`
+   null means there is no OpenCode database at all, a zeroed `today` means a real day
+   with no work in it - and any consumer can still tell which it is. The GLASS collapses
+   them, because a permanent "0 out" line is noise on a panel read from across a room.
+
+   BESIDE the burn stats, never folded into them. The limit gauges directly above
+   measure the operator's Anthropic account and the burn figures are that account being
+   spent; a single total mixing a second agent in would read as if it were the same
+   account, which is the one reading this line exists to avoid. */
+function opencodeLineText(block) {
+	if (!block || typeof block !== 'object') return null;
+	var today = block.today;
+	if (!today || typeof today !== 'object') return null;
+	var out = Number(today.outputTokens);
+	var msgs = Number(today.messages);
+	if (!isFinite(out) || !isFinite(msgs) || msgs <= 0) return null;
+	var text = fmtNum(out) + ' out \u00b7 ' + fmtNum(msgs) + ' msgs';
+	/* Only a REAL cost prints. The operator's own OpenCode runs through a flat-rate
+	   proxy that reports 0.00 on every message, and a "$0.00" would read as a measured
+	   zero rather than as the absence of per-call pricing. Same rule the Claude cost
+	   line already follows for the no-telemetry case. */
+	var cost = Number(block.costUSD);
+	if (isFinite(cost) && cost > 0) text += ' \u00b7 $' + cost.toFixed(2);
+	return text;
+}
+
 /* ------------------------------------------------------------------- polling */
 
 function baseUrl() {
@@ -1447,6 +1548,7 @@ function render() {
 
 	renderLimits(doc ? doc.limits : null, use24);
 	renderBurn(doc ? doc.burn : null);
+	renderOpenCode(doc ? doc.opencode : null);
 	renderSessions(sessions, status, quiet, doc ? doc.recap : null);
 	renderFleet(doc ? doc.fleet : null);
 	/* v0.21.0. Reads the document and not `status`: on a STALE feed the last good
@@ -2277,6 +2379,17 @@ function buildGauge(label, parent, index) {
 	return { root: root, pct: pct, fill: fill, reset: reset, forecast: forecast };
 }
 
+/* OC-a. One element, one text, display:none when there is nothing to say - the same
+   shape renderCost uses, and for the same reason: a zone that costs nothing when its
+   source is absent is a zone an operator without that source never has to think about. */
+function renderOpenCode(block) {
+	var el = document.getElementById('opencodeLine');
+	if (!el) return;
+	var text = opencodeLineText(block);
+	el.textContent = text || '';
+	el.style.display = text ? '' : 'none';
+}
+
 function renderBurn(burn) {
 	var today = burn && burn.today ? burn.today : null;
 	setText(ui.statOut, today ? fmtNum(today.outputTokens) : EMDASH);
@@ -3069,6 +3182,12 @@ function buildCard(s, quiet) {
 
 	var top = document.createElement('div');
 	top.className = 'card-top';
+	/* OC-a: the agent mark leads the row, BEFORE the state dot. Order matters — the
+	   mark says what this is and the dot says what it is doing, and reading identity
+	   first is the order every other card in the panel already follows (title, then
+	   activity). A row with no mark (an unknown client) simply starts at the dot. */
+	var glyph = clientGlyphEl(s);
+	if (glyph) top.appendChild(glyph);
 	var dot = document.createElement('span');
 	dot.className = 'dot';
 	var state = document.createElement('span');

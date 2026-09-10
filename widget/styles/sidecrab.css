@@ -1050,6 +1050,21 @@ body.quiet .quiet-note { display: block; }
 	overflow: hidden;
 	text-overflow: ellipsis;
 }
+/* OC-a. The OpenCode day, styled AS the cost line rather than like it: same family,
+   size, colour and clipping, so the two muted lines under the TODAY stats read as one
+   pair instead of two competing treatments. `display:none` is the default here too -
+   renderOpenCode turns it on only when there is something to report, so an operator
+   who does not run OpenCode never spends a pixel of this zone on it. */
+.opencode-line {
+	display: none;
+	font-family: var(--font-mono);
+	font-size: var(--fs-meta);
+	font-variant-numeric: tabular-nums;
+	color: var(--faint);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
 .cost-line.shown { display: block; }
 
 /* The whole block is the 24h/7d toggle's hit target, so the fingertip does not
@@ -1595,6 +1610,32 @@ body.empty .grid-empty { display: flex; }
 	border-radius: 50%;
 	background: var(--state-color, var(--faint));
 }
+/* ---------- the client glyph (OC-a) ---------- */
+
+/* Sized off --layout-unit like everything else in this row, so it tracks the card
+   through every density and every band the ios10-layout sheet generates rather than
+   needing an entry in each. Slightly TALLER than the state dot on purpose: the dot is
+   a filled circle and the glyph is open pixel art, and matched box heights make the
+   glyph read as the smaller of the two.
+
+   --faint, not --state-color: the dot beside it already carries the state, and a mark
+   that changed colour with it would say the same thing twice while looking like it
+   said something new. Identity is not a state. */
+.client-glyph {
+	flex: 0 0 auto;
+	width: calc(var(--layout-unit) * 1.5);
+	height: calc(var(--layout-unit) * 1.5);
+	fill: var(--faint);
+	/* The optical centre of both marks sits a touch high against the text baseline
+	   this row is aligned on; the dot has no such problem because it is symmetric. */
+	position: relative;
+	top: calc(var(--layout-unit) * 0.05);
+}
+/* A waiting card is the one place identity must not compete: the pulse and the
+   accent belong to the alert, so the mark steps back rather than joining in.
+   (--dim is an OPACITY in this sheet, not a colour - `fill: var(--dim)` would be
+   `fill: 1`, which is not a paint and would silently fall back to black.) */
+.card[data-state="needs_input"] .client-glyph { opacity: 0.55; }
 /* The writing tick (v0.11.0): two frames on the state dot, one second apart, on a
    working card whose last activity is fresh. It is the ONLY thing on the panel
    that says "this session is thinking, not hung", and it is deliberately a

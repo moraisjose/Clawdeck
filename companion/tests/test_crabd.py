@@ -9,6 +9,7 @@ import json
 import math
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -2283,9 +2284,12 @@ class ServeTests(TempProjects):
         # An EXACT key set, not assertIn: the v0.9.0 REMOVAL section of
         # STATE-CONTRACT.md drops a top-level key, and a reintroduced one has to fail
         # here rather than ship to the store.
+        # `opencode` joined in v0.31.0 (OC-a) and is ALWAYS present, null when the
+        # operator has no OpenCode database. Deliberately not conditional: a key that
+        # comes and goes cannot be told from a key a crabd is too old to serve.
         self.assertEqual(sorted(state),
                          ["approvals", "burn", "continuePrompts", "crabd", "fleet", "generatedAt",
-                          "host", "limits", "quiet", "recap", "schema", "sessions",
+                          "host", "limits", "opencode", "quiet", "recap", "schema", "sessions",
                           "toast"])
         # v0.22.0: the host's own CPU and memory, beside the iCUE temperature sensors.
         # PRESENCE is the feature detection and the key is OPTIONAL - this fixture
@@ -2330,8 +2334,10 @@ class ServeTests(TempProjects):
         _, state = self.get("/v1/state")
         self.assertEqual(len(state["sessions"]), 1)
         row = state["sessions"][0]
+        # `client` joined in v0.31.0 (OC-a), on EVERY row rather than only on the
+        # OpenCode ones - see _sessions for why an unmarked card is ambiguous.
         self.assertEqual(sorted(row),
-                         ["acked", "branch", "contextSource", "contextTokens",
+                         ["acked", "branch", "client", "contextSource", "contextTokens",
                           "contextWindowTokens", "cwd",
                           "events", "id", "lastActivityAt", "lastEvent", "model",
                           "pendingPermission", "question", "queuedContinue", "repo",
@@ -3425,7 +3431,7 @@ class ActionEndpointTests(ServedOverASocket):
         are all additive and none moves it."""
         self.assertEqual(self.state()["schema"], 5)
         self.assertEqual(crabd.SCHEMA_BREAKING, 5)
-        self.assertEqual(crabd.VERSION, "0.30.4")
+        self.assertEqual(crabd.VERSION, "0.31.0")
 
     def test_the_v6_fields_ride_on_schema_5_in_the_served_document(self):
         """The compat contract in ONE test: the fields the deployed v0.5.0 widget has
@@ -6201,7 +6207,7 @@ class HistoryEndpointTests(ServedOverASocket):
 
     def test_state_and_health_are_untouched_by_the_new_route(self):
         self.assertIn("schema", self.state())
-        self.assertEqual(self.client.get("/v1/health").json()["version"], "0.30.4")
+        self.assertEqual(self.client.get("/v1/health").json()["version"], "0.31.0")
 
     def test_the_endpoint_does_not_write_to_the_history_file(self):
         """Read-only by contract. A GET that touched the file would also invalidate its
@@ -11536,3 +11542,319 @@ class ContextWindowSerializationTests(TempProjects):
         row = self.row("claude-fable-5", models=self.catalog({"claude-fable-5": 200000}))
         served = json.loads(crabd.dump_state({"sessions": [row]}).decode("utf-8"))
         self.assertEqual(served["sessions"][0]["contextWindowTokens"], 200000)
+
+
+# ------------------------------------------------------------------------ opencode
+
+OPENCODE_SCHEMA = """
+CREATE TABLE session (
+  id text PRIMARY KEY, project_id text NOT NULL, workspace_id text, parent_id text,
+  slug text NOT NULL DEFAULT '', directory text NOT NULL, path text,
+  title text NOT NULL, version text NOT NULL DEFAULT '',
+  cost real DEFAULT 0 NOT NULL,
+  tokens_input integer DEFAULT 0 NOT NULL, tokens_output integer DEFAULT 0 NOT NULL,
+  tokens_reasoning integer DEFAULT 0 NOT NULL,
+  tokens_cache_read integer DEFAULT 0 NOT NULL,
+  tokens_cache_write integer DEFAULT 0 NOT NULL,
+  agent text, model text,
+  time_created integer NOT NULL, time_updated integer NOT NULL);
+CREATE TABLE message (
+  id text PRIMARY KEY, session_id text NOT NULL,
+  time_created integer NOT NULL, time_updated integer NOT NULL, data text NOT NULL);
+"""
+
+
+class OpenCodeTempDb(unittest.TestCase):
+    """A throwaway db with OpenCode 1.18.30's shape. NEVER the operator's own file -
+    same discipline TempProjects applies to ~/.claude, and for a sharper reason: this
+    one is a 500 MB database another program is writing to."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.db = Path(self._tmp.name) / "opencode.db"
+        con = sqlite3.connect(self.db)
+        con.executescript(OPENCODE_SCHEMA)
+        con.commit()
+        con.close()
+        self.NOW = time.time()
+
+    def add_session(self, sid, title="a session", updated=None, parent=None,
+                    directory="/repo/thing", model='{"id":"kimi-k3","providerID":"litellm"}',
+                    agent="build", tokens=(0, 0, 0, 0), cost=0.0):
+        con = sqlite3.connect(self.db)
+        con.execute(
+            "insert into session (id, project_id, parent_id, directory, title, model,"
+            " agent, cost, tokens_input, tokens_output, tokens_cache_read,"
+            " tokens_cache_write, time_created, time_updated)"
+            " values (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (sid, "prj", parent, directory, title, model, agent, cost,
+             tokens[0], tokens[1], tokens[2], tokens[3],
+             int((updated or self.NOW) * 1000), int((updated or self.NOW) * 1000)))
+        con.commit(); con.close()
+
+    def add_message(self, mid, sid, created, tokens=None, model="kimi-k3",
+                    provider="litellm", cost=0.0, role="assistant"):
+        data = {"role": role, "modelID": model, "providerID": provider, "cost": cost,
+                "tokens": tokens or {"input": 0, "output": 0, "reasoning": 0,
+                                     "cache": {"read": 0, "write": 0}},
+                "time": {"created": int(created * 1000)}}
+        con = sqlite3.connect(self.db)
+        con.execute("insert into message (id, session_id, time_created, time_updated,"
+                    " data) values (?,?,?,?,?)",
+                    (mid, sid, int(created * 1000), int(created * 1000),
+                     json.dumps(data)))
+        con.commit(); con.close()
+
+    def store(self, path=None):
+        return crabd.OpenCodeStore(self.db if path is None else path)
+
+
+class OpenCodeStoreTests(OpenCodeTempDb):
+    def test_an_absent_database_is_an_answer_not_an_error(self):
+        """The panel runs for operators who have never installed OpenCode, and for them
+        this is the ONLY code path. It must be silent, not a caught exception per poll."""
+        store = self.store(Path(self._tmp.name) / "nope.db")
+        self.assertEqual(store.sessions(self.NOW), [])
+        self.assertIsNone(store.usage(self.NOW))
+
+    def test_a_recent_session_is_served_as_a_card(self):
+        self.add_session("ses_a", title="Review pending PRs", updated=self.NOW - 30)
+        rows = self.store().sessions(self.NOW)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["id"], "ses_a")
+        self.assertEqual(rows[0]["title"], "Review pending PRs")
+        self.assertEqual(rows[0]["cwd"], "/repo/thing")
+
+    def test_the_model_blob_is_flattened_to_provider_slash_id(self):
+        """OpenCode stores `model` as a JSON object; the card wants one string, and the
+        provider is part of the identity - the same model id is served by more than one."""
+        self.add_session("ses_a", updated=self.NOW - 30)
+        self.assertEqual(self.store().sessions(self.NOW)[0]["model"], "litellm/kimi-k3")
+
+    def test_a_malformed_model_blob_does_not_lose_the_card(self):
+        self.add_session("ses_a", updated=self.NOW - 30, model="not json at all")
+        rows = self.store().sessions(self.NOW)
+        self.assertEqual(len(rows), 1)
+        self.assertIsNone(rows[0]["model"])
+
+    def test_children_fold_into_the_parent_and_never_get_their_own_card(self):
+        """Measured on the operator's own db: 73 of 103 sessions were children, and one
+        day held 59 sessions of which 57 were children. Unfolded, a single run puts 57
+        cards on the glass."""
+        self.add_session("ses_parent", title="the run", updated=self.NOW - 30)
+        for i in range(5):
+            self.add_session(f"ses_kid{i}", parent="ses_parent", updated=self.NOW - 20)
+        rows = self.store().sessions(self.NOW)
+        self.assertEqual([r["id"] for r in rows], ["ses_parent"])
+        self.assertEqual(rows[0]["subagents"], 5)
+
+    def test_a_childs_activity_keeps_the_parent_alive(self):
+        """The parent row's own clock stops while its children work - the same shape the
+        Claude dispatcher has, and the same answer: a child writing IS the run running."""
+        self.add_session("ses_parent", updated=self.NOW - 3600)
+        self.add_session("ses_kid", parent="ses_parent", updated=self.NOW - 10)
+        rows = self.store().sessions(self.NOW)
+        self.assertAlmostEqual(rows[0]["activity"], self.NOW - 10, delta=2)
+
+    def test_an_orphaned_child_is_served_on_its_own(self):
+        """A child whose parent fell out of the window (or was deleted) is still a real
+        session. Folding it into a parent that is not there would drop it silently."""
+        self.add_session("ses_kid", parent="ses_missing", updated=self.NOW - 30)
+        self.assertEqual([r["id"] for r in self.store().sessions(self.NOW)], ["ses_kid"])
+
+    def test_a_session_past_the_window_is_not_served(self):
+        self.add_session("ses_old", updated=self.NOW - (crabd.GONE_AFTER_SEC + 600))
+        self.assertEqual(self.store().sessions(self.NOW), [])
+
+    def test_reading_never_writes_to_the_database(self):
+        """The operator's real db is half a gigabyte with another process writing to it.
+        A read path that can dirty it is not acceptable at any speed."""
+        self.add_session("ses_a", updated=self.NOW - 30)
+        before = (self.db.stat().st_size, self.db.stat().st_mtime_ns)
+        self.store().sessions(self.NOW)
+        self.store().usage(self.NOW)
+        self.assertEqual((self.db.stat().st_size, self.db.stat().st_mtime_ns), before)
+
+    def test_a_schema_without_a_column_degrades_instead_of_dying(self):
+        """OpenCode's schema is internal and undocumented - measured on 1.18.30 and free
+        to move on any upgrade. A column that goes away must cost its own field, not the
+        whole feed."""
+        con = sqlite3.connect(self.db)
+        con.execute("alter table session drop column agent")
+        con.commit(); con.close()
+        self.add_session_without_agent = None
+        con = sqlite3.connect(self.db)
+        con.execute("insert into session (id, project_id, directory, title, model,"
+                    " time_created, time_updated) values (?,?,?,?,?,?,?)",
+                    ("ses_a", "prj", "/repo", "t", None,
+                     int(self.NOW * 1000), int(self.NOW * 1000)))
+        con.commit(); con.close()
+        rows = self.store().sessions(self.NOW)
+        self.assertEqual(len(rows), 1)
+        self.assertIsNone(rows[0]["agent"])
+
+    def test_an_unreadable_file_is_the_absent_case(self):
+        self.db.write_bytes(b"this is not a sqlite database")
+        self.assertEqual(self.store().sessions(self.NOW), [])
+        self.assertIsNone(self.store().usage(self.NOW))
+
+
+class OpenCodeUsageTests(OpenCodeTempDb):
+    def toks(self, out, inp=0, cr=0, cw=0):
+        return {"input": inp, "output": out, "reasoning": 0,
+                "cache": {"read": cr, "write": cw}}
+
+    def test_todays_messages_are_summed(self):
+        self.add_message("m1", "s", self.NOW - 60, self.toks(100, inp=7, cr=5, cw=3))
+        self.add_message("m2", "s", self.NOW - 30, self.toks(50))
+        u = self.store().usage(self.NOW)
+        self.assertEqual(u["today"]["outputTokens"], 150)
+        self.assertEqual(u["today"]["inputTokens"], 7)
+        self.assertEqual(u["today"]["cacheReadTokens"], 5)
+        self.assertEqual(u["today"]["cacheCreationTokens"], 3)
+        self.assertEqual(u["today"]["messages"], 2)
+
+    def test_yesterdays_messages_are_not_in_todays_total(self):
+        """Local midnight, the same boundary `burn.today` uses - the two numbers sit
+        beside each other on the panel and a different cut would make them incomparable."""
+        self.add_message("m1", "s", self.NOW - 30, self.toks(50))
+        self.add_message("old", "s", self.NOW - 40 * 3600, self.toks(9999))
+        self.assertEqual(self.store().usage(self.NOW)["today"]["outputTokens"], 50)
+
+    def test_output_is_broken_down_by_model(self):
+        self.add_message("m1", "s", self.NOW - 60, self.toks(100), model="kimi-k3")
+        self.add_message("m2", "s", self.NOW - 30, self.toks(40), model="gpt-5.6-terra",
+                         provider="openai")
+        self.add_message("m3", "s", self.NOW - 20, self.toks(10), model="kimi-k3")
+        by = {m["model"]: m["outputTokens"] for m in self.store().usage(self.NOW)["byModel"]}
+        self.assertEqual(by, {"litellm/kimi-k3": 110, "openai/gpt-5.6-terra": 40})
+
+    def test_a_user_message_carries_no_usage_and_is_not_counted(self):
+        self.add_message("m1", "s", self.NOW - 30, self.toks(50))
+        self.add_message("u1", "s", self.NOW - 29, role="user")
+        self.assertEqual(self.store().usage(self.NOW)["today"]["messages"], 1)
+
+    def test_cost_is_summed_and_served(self):
+        self.add_message("m1", "s", self.NOW - 60, self.toks(1), cost=0.25)
+        self.add_message("m2", "s", self.NOW - 30, self.toks(1), cost=0.75)
+        self.assertAlmostEqual(self.store().usage(self.NOW)["costUSD"], 1.0, places=6)
+
+    def test_a_day_with_nothing_in_it_is_zeroes_not_absence(self):
+        """Absence of the DATABASE is null - OpenCode is not installed. A quiet day is a
+        real answer and must render as one, or the panel cannot tell them apart."""
+        self.add_message("old", "s", self.NOW - 40 * 3600, self.toks(9999))
+        u = self.store().usage(self.NOW)
+        self.assertIsNotNone(u)
+        self.assertEqual(u["today"]["outputTokens"], 0)
+        self.assertEqual(u["byModel"], [])
+
+    def test_a_malformed_message_row_is_skipped_not_fatal(self):
+        con = sqlite3.connect(self.db)
+        con.execute("insert into message (id, session_id, time_created, time_updated,"
+                    " data) values ('bad','s',?,?,'{not json')",
+                    (int(self.NOW * 1000), int(self.NOW * 1000)))
+        con.commit(); con.close()
+        self.add_message("m1", "s", self.NOW - 30, self.toks(50))
+        self.assertEqual(self.store().usage(self.NOW)["today"]["outputTokens"], 50)
+
+
+class OpenCodeThroughTheBuilderTests(OpenCodeTempDb):
+    """The wire half: OpenCode rows beside Claude rows in one `sessions` array."""
+
+    def setUp(self):
+        super().setUp()
+        self._proj = tempfile.TemporaryDirectory()
+        self.addCleanup(self._proj.cleanup)
+        self.projects = Path(self._proj.name) / "projects"
+        self.projects.mkdir(parents=True)
+        original = crabd.USER_CONFIG_FILE
+        crabd.USER_CONFIG_FILE = Path(self._proj.name) / "config.json"
+        self.addCleanup(lambda: setattr(crabd, "USER_CONFIG_FILE", original))
+
+    def build(self, now=None, with_opencode=True):
+        builder = crabd.StateBuilder(
+            crabd.TranscriptStore(self.projects), crabd.HookTracker(),
+            StubLimits(), time.time(),
+            opencode=self.store() if with_opencode else None)
+        return builder.build(now=now or self.NOW)
+
+    def claude_session(self, sid="cc-1", when=None):
+        write_jsonl(self.projects / "C--IT" / f"{sid}.jsonl", [
+            user_line("do the thing", (when or self.NOW) - 5),
+            assistant_line("req-1", when or self.NOW),
+        ], mtime=when or self.NOW)
+
+    def row(self, doc, sid):
+        return next((s for s in doc["sessions"] if s["id"] == sid), None)
+
+    def test_a_claude_session_says_which_client_it_is(self):
+        """Named on BOTH kinds, never only on the newcomer: a card with no marking is
+        ambiguous to anyone who has not memorised which agent is the default."""
+        self.claude_session()
+        self.assertEqual(self.row(self.build(), "cc-1")["client"], crabd.CLAUDE_CLIENT)
+
+    def test_an_opencode_session_is_served_as_a_card(self):
+        self.add_session("ses_a", title="Review pending PRs", updated=self.NOW - 30)
+        row = self.row(self.build(), "ses_a")
+        self.assertIsNotNone(row)
+        self.assertEqual(row["client"], crabd.OPENCODE_CLIENT)
+        self.assertEqual(row["title"], "Review pending PRs")
+        self.assertEqual(row["model"], "litellm/kimi-k3")
+
+    def test_both_kinds_land_in_one_array(self):
+        self.claude_session()
+        self.add_session("ses_a", updated=self.NOW - 30)
+        ids = {s["id"] for s in self.build()["sessions"]}
+        self.assertEqual(ids, {"cc-1", "ses_a"})
+
+    def test_an_opencode_session_ages_by_the_same_rules(self):
+        self.add_session("ses_live", updated=self.NOW - 30)
+        self.add_session("ses_quiet", updated=self.NOW - (crabd.IDLE_AFTER_SEC + 120))
+        doc = self.build()
+        self.assertEqual(self.row(doc, "ses_live")["state"], "working")
+        self.assertEqual(self.row(doc, "ses_quiet")["state"], "idle")
+
+    def test_an_opencode_session_can_never_alert(self):
+        """No hook can raise one, so nothing in this path may invent one. needs_input is
+        the panel's loudest signal and it has to keep meaning exactly one thing."""
+        self.add_session("ses_a", updated=self.NOW - 30)
+        row = self.row(self.build(), "ses_a")
+        self.assertNotEqual(row["state"], "needs_input")
+        self.assertIsNone(row["question"])
+        self.assertIsNone(row["pendingPermission"])
+        self.assertFalse(row["acked"])
+
+    def test_an_opencode_card_carries_its_subagent_count(self):
+        self.add_session("ses_p", updated=self.NOW - 30)
+        for i in range(3):
+            self.add_session(f"ses_k{i}", parent="ses_p", updated=self.NOW - 20)
+        self.assertEqual(self.row(self.build(), "ses_p")["subagents"]["total"], 3)
+
+    def test_the_opencode_block_rides_beside_burn_not_inside_it(self):
+        """The limit gauges measure the Anthropic account and `burn` sits under them. A
+        merged total would read as if it were the same account being spent."""
+        self.add_message("m1", "s", self.NOW - 60,
+                         {"input": 1, "output": 100, "reasoning": 0,
+                          "cache": {"read": 0, "write": 0}})
+        doc = self.build()
+        self.assertEqual(doc["opencode"]["today"]["outputTokens"], 100)
+        self.assertEqual(doc["burn"]["today"]["outputTokens"], 0)
+
+    def test_no_store_attached_serves_a_null_block_and_no_rows(self):
+        self.claude_session()
+        doc = self.build(with_opencode=False)
+        self.assertIsNone(doc["opencode"])
+        self.assertEqual([s["id"] for s in doc["sessions"]], ["cc-1"])
+
+    def test_the_block_survives_the_json_round_trip(self):
+        self.add_message("m1", "s", self.NOW - 60,
+                         {"input": 0, "output": 7, "reasoning": 0,
+                          "cache": {"read": 0, "write": 0}})
+        served = json.loads(crabd.dump_state(self.build()).decode("utf-8"))
+        self.assertEqual(served["opencode"]["today"]["outputTokens"], 7)
+
+    def test_the_schema_number_does_not_move(self):
+        """Additive: a `client` member and one new top-level block, both feature-detected
+        by presence. An older widget ignores unknown keys and keeps working."""
+        self.assertEqual(self.build()["schema"], 5)
