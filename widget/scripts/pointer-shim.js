@@ -30,7 +30,27 @@
    No coalescing, no pressure, no tilt, no capture, no pointerType branch. So a
    faithful synthetic event is a small object, and multi-touch works as long as
    pointerId is stable per finger — which Touch.identifier already guarantees.
-   That is what keeps the two-finger tap (ack-all) working. */
+   That is what keeps the two-finger tap (ack-all) working.
+
+   EVERY POINTER MUST BE CLOSED, AND THIS IS THE HARD PART. A first version of
+   this file relayed changedTouches straight through and leaked pointers, with a
+   failure that looks nothing like its cause: once .cards became scrollable, iOS
+   handed scrolling touches to the scroller and stopped sending touchend for them,
+   so a record stayed in sidecrab.js's `pointers` map forever. The NEXT single tap
+   then made livePointers() === 2, the gesture layer read it as a second finger
+   (sidecrab.js:5236), fired the two-finger ack and called suppressClick() — and
+   every button on the panel stopped responding until reload.
+
+   `.zones { touch-action: none }` is upstream's declaration that nothing in there
+   scrolls, and it is why upstream never meets this. It does not save us: full
+   touch-action is Safari 13, the same release that brought Pointer Events, so on
+   every browser that needs this file it is inert by definition.
+
+   So the shim tracks its own live set and RECONCILES it against event.touches,
+   which the browser always reports accurately, on every event. Any pointer the
+   browser has stopped listing is closed with pointercancel — cancel and not up,
+   because up COMMITS a gesture (a swipe past its threshold dismisses a card) and
+   a touch stolen by a scroller was never a decision. */
 
 (function () {
 	'use strict';
@@ -41,9 +61,12 @@
 	if (typeof window.PointerEvent !== 'undefined') return;
 	if (!('ontouchstart' in window)) return;
 
-	/* touchend / touchcancel carry the finger in changedTouches and NOT in touches
-	   (it has already left the list), so the two are read separately throughout. */
-	function relay(touch, type, target) {
+	/* identifier -> last seen {x, y, target}. The coordinates are kept so a
+	   reconciled cancel can carry the finger's last real position rather than a
+	   zero that would read as a jump across the panel. */
+	var live = {};
+
+	function relay(id, x, y, target, type) {
 		var ev;
 		try {
 			ev = new Event(type, { bubbles: true, cancelable: false });
@@ -55,9 +78,9 @@
 		}
 		/* Plain Event defines none of these, so assignment is enough — no need to
 		   fight read-only accessors the way a synthetic MouseEvent would. */
-		ev.pointerId = touch.identifier;
-		ev.clientX = touch.clientX;
-		ev.clientY = touch.clientY;
+		ev.pointerId = id;
+		ev.clientX = x;
+		ev.clientY = y;
 		ev.pointerType = 'touch';
 		ev.isPrimary = true;
 		ev.synthetic = true;
@@ -65,11 +88,26 @@
 		/* Dispatched on the touch's own target so ev.target is the element under the
 		   finger — five reads in the gesture layer depend on it (that is how a swipe
 		   finds its card). It then bubbles to the document listeners on its own. */
-		(target || touch.target || document.body).dispatchEvent(ev);
+		(target || document.body).dispatchEvent(ev);
 	}
 
-	function relayList(list, type) {
-		for (var i = 0; i < list.length; i++) relay(list[i], type);
+	/* Close every pointer the browser no longer lists in event.touches. Called on
+	   EVERY touch event, including touchstart — where event.touches already
+	   contains the finger just placed, so a new pointer is never swept by the same
+	   event that opens it. */
+	function reconcile(e) {
+		var present = {}, i, id;
+		for (i = 0; i < e.touches.length; i++) present[e.touches[i].identifier] = true;
+		for (id in live) {
+			if (!Object.prototype.hasOwnProperty.call(live, id)) continue;
+			if (present[id]) continue;
+			relay(Number(id), live[id].x, live[id].y, live[id].target, 'pointercancel');
+			delete live[id];
+		}
+	}
+
+	function each(list, fn) {
+		for (var i = 0; i < list.length; i++) fn(list[i]);
 	}
 
 	/* PASSIVE, exactly like the listeners upstream registers. Nothing here calls
@@ -87,23 +125,45 @@
 	} catch (e) { /* no options support: `false` is the correct useCapture */ }
 
 	document.addEventListener('touchstart', function (e) {
-		relayList(e.changedTouches, 'pointerdown');
+		reconcile(e);
+		each(e.changedTouches, function (t) {
+			live[t.identifier] = { x: t.clientX, y: t.clientY, target: t.target };
+			relay(t.identifier, t.clientX, t.clientY, t.target, 'pointerdown');
+		});
 	}, opts);
 
 	document.addEventListener('touchmove', function (e) {
-		relayList(e.changedTouches, 'pointermove');
+		each(e.changedTouches, function (t) {
+			var rec = live[t.identifier];
+			if (!rec) return;          /* already reconciled away — do not resurrect it */
+			rec.x = t.clientX;
+			rec.y = t.clientY;
+			relay(t.identifier, t.clientX, t.clientY, rec.target, 'pointermove');
+		});
+		reconcile(e);
 	}, opts);
 
 	document.addEventListener('touchend', function (e) {
-		relayList(e.changedTouches, 'pointerup');
+		each(e.changedTouches, function (t) {
+			var rec = live[t.identifier];
+			if (!rec) return;
+			delete live[t.identifier];
+			relay(t.identifier, t.clientX, t.clientY, rec.target, 'pointerup');
+		});
+		reconcile(e);
 	}, opts);
 
 	/* A cancelled touch must go to onPointerCancel and NOT onPointerUp: up commits
-	   the gesture (a swipe past its threshold dismisses a card), cancel discards it.
-	   Routing cancel to up would let an interrupted drag acknowledge something the
-	   operator never meant to. */
+	   the gesture, cancel discards it. Routing cancel to up would let an interrupted
+	   drag acknowledge something the operator never meant to. */
 	document.addEventListener('touchcancel', function (e) {
-		relayList(e.changedTouches, 'pointercancel');
+		each(e.changedTouches, function (t) {
+			var rec = live[t.identifier];
+			if (!rec) return;
+			delete live[t.identifier];
+			relay(t.identifier, t.clientX, t.clientY, rec.target, 'pointercancel');
+		});
+		reconcile(e);
 	}, opts);
 
 	if (window.console && window.console.log) {

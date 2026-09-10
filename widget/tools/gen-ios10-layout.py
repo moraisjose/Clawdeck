@@ -250,11 +250,18 @@ CORRECTIONS = """
 		   here and no card is clipped by its own cell (.card is overflow:hidden). If
 		   a future engine does resolve the height, they become four equal rows that
 		   fill it. Both readings are correct; only the coin-flip is removed. */
+		   touch-action carves the vertical axis back out of `.zones { touch-action:
+		   none }`, which upstream declares because nothing in there scrolls — true
+		   until this rule. It is a no-op on the device this file is for (full
+		   touch-action is Safari 13, the same release that brought Pointer Events,
+		   so every browser that needs this file ignores it) and it is what makes the
+		   scroll work on the Safari 12-14 range that also lands in this block. */
 		.cards {
 			grid-template-rows: 25% 25% 25% 25%;
 			align-content: start;
 			overflow-y: auto;
 			-webkit-overflow-scrolling: touch;
+			touch-action: pan-y;
 		}
 
 		/* ---- the header stops writing over itself ----
