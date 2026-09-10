@@ -383,6 +383,46 @@
 @supports not (gap: 1px) {
 	@media (min-height: 421px) and (min-width: 641px) {
 		.zone-identity > * + * { margin-top: 0; margin-left: calc(var(--layout-unit) * 2.2); }
+
+		/* ---- the crab is sized to the clock, not to the row ----
+
+		   .crab is `width: 100%; height: 100%` inside .crab-wrap, which is
+		   `flex: 1 1 auto` with no definite height of its own. When the percentage
+		   height does not resolve — which is the same missing definite-height chain
+		   that stopped the sheet scrolling — an <svg> with a viewBox falls back to
+		   its INTRINSIC ratio and derives its height from its width. In the
+		   near-square band that width is most of 1024px, so the crab inflates to
+		   several hundred px, takes the whole band with it and pushes Limits and
+		   Sessions off the bottom of a screen that has body{overflow:hidden}.
+
+		   So the band is measured off the crab rather than the other way round.
+		   Height is stated in --fs-clock units to sit beside the clock by
+		   construction, and the width is stated explicitly rather than left to the
+		   SVG's intrinsic ratio, because relying on that ratio is what caused this.
+		   52/44 is the viewBox (0 -4 52 44), so 1.182.
+
+		   TO TUNE: change the 1.25 below and nothing else. The viewBox carries ~10
+		   units of empty headroom above the shell and ~6 below the legs, so the
+		   PAINTED animal is about 28 of its 44 units — the box has to run a little
+		   taller than the clock for the crab to read as the same size as it. */
+		   THE ORDER OF THESE TWO RULES IS A DEPENDENCY, not a preference. The shared
+		   block above sets `.crab-wrap { flex: 1 1 0 }` and says why: flex-basis 0,
+		   NOT auto, because `.crab { width: 100% }` inside an auto-width flex item is
+		   circular — upstream measured the wrap coming out 0 px wide and the clock
+		   overflowing the zone by 214 px. Going back to basis auto here is only safe
+		   BECAUSE the crab below is given an explicit width in the same breath, which
+		   breaks that circularity. Restore any percentage width on .crab and the wrap
+		   collapses to zero and takes the clock with it. */
+		:root { --legacy-crab-h: calc(var(--fs-clock) * 1.25); }
+		.crab-wrap { flex: 0 0 auto; width: auto; }
+		.crab {
+			height: var(--legacy-crab-h);
+			max-height: var(--legacy-crab-h);
+			width: calc(var(--legacy-crab-h) * 1.182);
+		}
+		/* Without this the band keeps its 29% and the shorter crab buys nothing:
+		   the point of capping it is to let the two zones below move up. */
+		.zone-identity { height: auto; }
 	}
 	@media (min-height: 421px) and (max-width: 640px) {
 		.zone-limits > * + * { margin-top: 0; margin-left: var(--space-gap); }
