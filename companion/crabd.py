@@ -75,7 +75,7 @@ from pathlib import Path, PureWindowsPath
 # does NOT - the .icuewidget import is a double-click at the iCUE console - so shipping
 # schema N+1 dead-feeds the on-glass panel until someone stands at the desk.
 SCHEMA_BREAKING = 5
-VERSION = "0.30.2"
+VERSION = "0.30.3"
 
 HOST = "127.0.0.1"
 # 2722 is the production port and the Scheduled Task owns it. CRABD_PORT exists so a
@@ -655,6 +655,25 @@ EXPIRY_POLL_SEC = 30.0
 # arrived with no `message`, and (RESTART-a) a question restored by replay, which the
 # history file cannot carry text for. One constant because the two must render alike -
 # the restored card is not a second shape the panel has to know about.
+# IDLE-a (operator-reported, 2026-09-10). The ring entry for a `Notification` that
+# landed on a FINISHED row. Claude Code fires that hook for at least three things - a
+# permission dialog, an AskUserQuestion sheet, and, 60 s after a turn ends, "Claude is
+# waiting for your input", which means the session finished and is sitting at the prompt.
+# Only the first two are questions. Measured on the reporting run, `turn finished` ->
+# `asked a question`: 61 s, 60 s, 60 s, 60 s - four idle nudges lighting the panel's
+# loudest alert on sessions that had simply stopped. The one GENUINE alert in the same
+# snapshot had no `Stop` between its prompt and its Notification.
+#
+# The discriminator is the row's own state, and the rule already exists in the other
+# direction: PERMISSION_ALERT_FROM lists what a PermissionRequest may raise an alert
+# FROM, and `done` is deliberately not among them.
+#
+# THE RESIDUAL: a CONTINUATION turn (crabd's own Stop answer forces another turn with no
+# UserPromptSubmit) leaves the row on `done` while the turn runs, so a real dialog opening
+# in one is read as a nudge and its alert is dropped. That is the same hole
+# PERMISSION_ALERT_FROM already has on the same rows, and closing it needs the tracker to
+# know the transcript moved - which it deliberately does not.
+IDLE_NUDGE_EVENT = "idle at the prompt"
 WAITING_LABEL = "waiting on you"
 NEEDS_INPUT_CLEARED_EVENT = "answered outside the panel"
 # DISPATCH-a (operator-reported, 2026-09-10). THE GAP THE SIGNAL ABOVE CANNOT CLOSE: a
@@ -2482,6 +2501,28 @@ class HookTracker:
     # that kept it out expired.
     REPLAY_STATES = {EVENT_TEXT["Stop"]: "done", EVENT_TEXT["SessionEnd"]: "gone",
                      EVENT_TEXT["Notification"]: "needs_input"}
+    # The kinds the replay UNDO ARM fires on: the ones that MOVE the live state machine,
+    # and no others. It was written the other way round - undo on anything not in
+    # REPLAY_STATES - which was harmless while only terminal states were restored (their
+    # own kinds were the only ones that could follow one). Restoring `needs_input`
+    # (RESTART-a) broke that: a question is followed by all sorts of ring entries that
+    # moved NOTHING when they were live, and each one silently retired the alert.
+    #
+    # The three that cost the most, all reachable on one card:
+    #   - `acknowledged from Edge` - ack() sets `acked` and never touches `state`. Undoing
+    #     on it means the operator SILENCING a real alert from the panel is what loses it
+    #     across the next restart, and the alerts most likely to be acked are the ones
+    #     that stood longest.
+    #   - `subagent finished` - a bare one means the 0.30.1 stand-down did NOT fire (it
+    #     writes its own entry when it does), so the live row kept its alert.
+    #   - `continue queued: …` / `continue sent: …` - note_external, which the state
+    #     machine does not read at all.
+    # The CLEAR events are deliberately in: each one means the alert ended, and a restore
+    # past one would re-raise something already stood down.
+    REPLAY_MOVES = frozenset({EVENT_TEXT["SessionStart"], EVENT_TEXT["UserPromptSubmit"],
+                              NEEDS_INPUT_CLEARED_EVENT, SUBAGENT_CLEARED_EVENT,
+                              PERMISSION_CLEARED_EVENT})
+
     def __init__(self, history: "HistoryLog | None" = None) -> None:
         self._lock = threading.Lock()
         self.sessions: dict[str, dict] = {}
@@ -2546,11 +2587,23 @@ class HookTracker:
             if isinstance(cwd, str) and cwd:
                 row["cwd"] = cwd
 
+            # IDLE-a. Classified BEFORE the ring is written, because the entry text is
+            # part of the answer: a nudge logged as "asked a question" would be a
+            # question on the operator's timeline whatever the state machine then did.
+            idle_nudge = event == "Notification" and row["state"] == "done"
+
             # Recorded before the SubagentStop early-return: the ring is every hook seen,
             # not only the ones that move the state machine.
-            timeline = self.EVENT_TEXT.get(event)
+            timeline = IDLE_NUDGE_EVENT if idle_nudge else self.EVENT_TEXT.get(event)
             if timeline:
                 self._note_event(row, timeline, now, session_id)
+
+            # The row stays `done`, keeping its own label and its null question. Returning
+            # here rather than filtering below is deliberate: a nudge moves NOTHING - not
+            # `since`, not `acked`, not `permission_alert` - so a card the operator has
+            # already seen finish is not re-dated by the CLI reminding them it finished.
+            if idle_nudge:
+                return
 
             if event == "SubagentStop":
                 row["stops"].append(now)
@@ -2900,7 +2953,8 @@ class HookTracker:
                 self._note_event(row, kind, ts, persist=False)
                 if self.REPLAY_STATES.get(kind) and ts >= terminal.get(sid, (0.0,))[0]:
                     terminal[sid] = (ts, self.REPLAY_STATES[kind])
-                elif sid in terminal and ts >= terminal[sid][0]:
+                elif (kind in self.REPLAY_MOVES
+                      and sid in terminal and ts >= terminal[sid][0]):
                     del terminal[sid]
             for sid, (ts, state) in terminal.items():
                 row = self.sessions[sid]

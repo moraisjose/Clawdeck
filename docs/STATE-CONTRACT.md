@@ -14,6 +14,74 @@
 > The "Schema 6" section below is retitled in place: its FIELDS are unchanged and live; only
 > the schema NUMBER they ride on is now 5.
 
+## v0.30.3 (2026-09-10 — BEHAVIOUR; schema stays 5, no field added or removed)
+
+No shape change. What changes is **which `Notification` counts as a question**. crabd `VERSION` →
+`0.30.3`.
+
+### 1. THE GAP — a finished session lighting the loudest alert on the panel
+
+Reported by the operator with four alerting cards, of which **one** was real.
+
+Claude Code fires `Notification` for at least three different things, and crabd mapped all three to
+`needs_input`:
+
+| What fired it | Is the session blocked? |
+|---|---|
+| A permission dialog (`"Claude needs your permission to use Bash"`) | yes |
+| An `AskUserQuestion` sheet | yes |
+| **60 s of silence after a turn ends** (`"Claude is waiting for your input"`) | **no — it finished** |
+
+The third is the CLI reminding the operator that a session is sitting at the prompt. Measured on the
+reporting run, `turn finished` → `asked a question` on three rows: **61 s, 60 s, 60 s** (and a fourth
+pair on one of them, 60 s). The single genuine alert had **no `Stop`** between its prompt and its
+Notification — it arrived mid-turn, on a session whose transcript ends at a `tool_result` with no
+reply after it, which is what a tool waiting on a permission decision looks like.
+
+### 2. THE DISCRIMINATOR — the row's own state
+
+A `Notification` landing on a **`done`** row is the idle nudge and raises nothing: the row keeps its
+state, its `finished` label and its null `question`, and `stateSince` / `acked` are untouched, so a
+card the operator already watched finish is not re-dated by the CLI reminding them it finished. It
+still reaches the timeline, as **`"idle at the prompt"`** — it happened, and logging it as
+`"asked a question"` would put a question on the operator's timeline that was never asked.
+
+This is not a new rule so much as the existing one applied on the other side:
+`PERMISSION_ALERT_FROM` already lists the states a `PermissionRequest` may raise an alert **from** —
+`{None, "working", "idle"}` — and `done` is deliberately absent.
+
+### 2b. The replay undo arm is now an ALLOWLIST
+
+Found while shipping the above. The undo arm — the rule that retires a replayed state when a later
+ring entry follows it — fired on **anything** not in `REPLAY_STATES`. That was harmless while only
+terminal states were restored: the only kinds that could follow a finish were themselves terminal.
+Restoring `needs_input` (v0.30.2) broke it, because a question is followed by all sorts of entries
+that moved *nothing* when they were live, and each silently retired the alert.
+
+`REPLAY_MOVES` now lists the kinds that actually move the state machine — `session started`,
+`prompt submitted`, and the three clear events — and the undo arm fires on those alone. The three
+that cost the most, all reachable on one card:
+
+| Ring entry | What it did live | Undoing on it meant |
+|---|---|---|
+| `acknowledged from Edge` | `ack()` sets `acked`, never `state` | the operator **silencing** a real alert is what loses it across the next restart — and the alerts most likely to be acked are the ones that stood longest |
+| `subagent finished` | nothing on its own (the v0.30.1 stand-down writes its **own** entry when it fires) | an alert the live row kept was dropped |
+| `continue queued: …` | `note_external`, which the state machine does not read | same |
+
+The clear events (`answered outside the panel`, `subagent returned, alert cleared`,
+`permission alert cleared`) are deliberately **in**: each means the alert ended, and a restore past
+one would re-raise something already stood down. `idle at the prompt` is deliberately **out** — the
+sequence it makes commonest is finish, nudge 60 s later, and undoing there would put the row back
+to stateless, which `_resolve` serves as `working`: the v0.30.2 defect re-entered through its own
+fix.
+
+### 3. THE RESIDUAL
+
+A **continuation turn** — crabd's own `Stop` answer forcing another turn with no `UserPromptSubmit`
+— leaves the row on `done` while that turn runs. A real dialog opening inside one is read as a nudge
+and its alert is dropped. That is the same hole `PERMISSION_ALERT_FROM` already has on the same
+rows, and closing it needs the tracker to know the transcript moved — which it deliberately does not.
+
 ## v0.30.2 (2026-09-10 — BEHAVIOUR; schema stays 5, no field added or removed)
 
 No shape change. What changes is **what counts as a session doing something** — the clock

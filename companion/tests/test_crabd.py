@@ -1230,6 +1230,88 @@ class SubagentClearsNeedsInputTests(unittest.TestCase):
         self.assertEqual(self.row()["since"], since)
 
 
+class IdleNudgeIsNotAQuestionTests(unittest.TestCase):
+    """A Notification on a FINISHED row is the CLI's idle nudge, not a question (IDLE-a).
+
+    THE GAP, operator-reported 2026-09-10 with four alerting cards of which one was real.
+    Claude Code fires `Notification` for at least three different things: a permission
+    dialog, an AskUserQuestion sheet, and - 60 s after a turn ends - "Claude is waiting
+    for your input", which means the session finished and is sitting at the prompt.
+    crabd mapped all three to `needs_input`, so a session that had simply FINISHED lit
+    the panel's loudest alert.
+
+    Measured on the reporting run, `turn finished` -> `asked a question` on three rows:
+    61 s, 60 s, 60 s (and a fourth pair on one of them, 60 s). The one genuine alert had
+    no `Stop` between its prompt and its Notification - it arrived mid-turn, on a session
+    whose transcript ends at a `tool_result` with no reply after it, which is what a tool
+    waiting on a permission decision looks like.
+
+    The discriminator is the row's own state, and the rule already exists in the other
+    direction: PERMISSION_ALERT_FROM lists the states a PermissionRequest may raise an
+    alert from and `done` is deliberately not among them.
+    """
+
+    SID = "s1"
+
+    def setUp(self):
+        self.hooks = crabd.HookTracker()
+
+    def send(self, event, **extra):
+        payload = {"session_id": self.SID, "hook_event_name": event, "cwd": "C:\\IT"}
+        payload.update(extra)
+        self.hooks.record(payload)
+
+    def row(self):
+        return self.hooks.snapshot()[self.SID]
+
+    def test_a_notification_after_a_finished_turn_does_not_raise_an_alert(self):
+        self.send("UserPromptSubmit")
+        self.send("Stop")
+        self.send("Notification", message="Claude is waiting for your input")
+        self.assertEqual(self.row()["state"], "done")
+
+    def test_the_finished_card_keeps_its_own_label_and_no_question(self):
+        self.send("UserPromptSubmit")
+        self.send("Stop")
+        self.send("Notification", message="Claude is waiting for your input")
+        self.assertEqual(self.row()["last_event"], "finished")
+        self.assertIsNone(self.row()["question"])
+
+    def test_the_nudge_is_logged_as_what_it_is(self):
+        """Still on the timeline - it happened - but not as a question it was not."""
+        self.send("UserPromptSubmit")
+        self.send("Stop")
+        self.send("Notification", message="Claude is waiting for your input")
+        texts = [e["text"] for e in self.row()["events"]]
+        self.assertEqual(texts[0], crabd.IDLE_NUDGE_EVENT)
+        self.assertNotIn("asked a question", texts)
+
+    def test_a_notification_during_a_live_turn_still_raises(self):
+        """The real one. No Stop since the prompt, so this is a question."""
+        self.send("UserPromptSubmit")
+        self.send("Notification", message="Claude needs your permission to use Bash")
+        self.assertEqual(self.row()["state"], "needs_input")
+
+    def test_a_notification_on_an_idle_row_still_raises(self):
+        """`idle` is alertable - PERMISSION_ALERT_FROM says so, for the SDK/headless run
+        that opens a dialog from a just-started session."""
+        self.send("SessionStart")
+        self.send("Notification", message="Claude needs your permission to use Bash")
+        self.assertEqual(self.row()["state"], "needs_input")
+
+    def test_a_notification_on_a_fresh_row_still_raises(self):
+        self.send("Notification", message="which host?")
+        self.assertEqual(self.row()["state"], "needs_input")
+
+    def test_the_next_prompt_is_unaffected(self):
+        """The nudge must not leave the row in a shape the next turn cannot move."""
+        self.send("UserPromptSubmit")
+        self.send("Stop")
+        self.send("Notification", message="Claude is waiting for your input")
+        self.send("UserPromptSubmit")
+        self.assertEqual(self.row()["state"], "working")
+
+
 # ---------------------------------------------------------------------------- burn
 
 class BurnTests(unittest.TestCase):
@@ -3343,7 +3425,7 @@ class ActionEndpointTests(ServedOverASocket):
         are all additive and none moves it."""
         self.assertEqual(self.state()["schema"], 5)
         self.assertEqual(crabd.SCHEMA_BREAKING, 5)
-        self.assertEqual(crabd.VERSION, "0.30.2")
+        self.assertEqual(crabd.VERSION, "0.30.3")
 
     def test_the_v6_fields_ride_on_schema_5_in_the_served_document(self):
         """The compat contract in ONE test: the fields the deployed v0.5.0 widget has
@@ -6119,7 +6201,7 @@ class HistoryEndpointTests(ServedOverASocket):
 
     def test_state_and_health_are_untouched_by_the_new_route(self):
         self.assertIn("schema", self.state())
-        self.assertEqual(self.client.get("/v1/health").json()["version"], "0.30.2")
+        self.assertEqual(self.client.get("/v1/health").json()["version"], "0.30.3")
 
     def test_the_endpoint_does_not_write_to_the_history_file(self):
         """Read-only by contract. A GET that touched the file would also invalidate its
@@ -9096,6 +9178,55 @@ class ReplayRestoresTerminalStateTests(HistoryTempFile):
     def test_a_question_after_a_finish_wins_over_the_finish(self):
         tracker, row, now = self.replayed(["turn finished", "asked a question"])
         self.assertEqual(row["state"], "needs_input")
+
+    def test_an_idle_nudge_does_not_undo_a_replayed_finish(self):
+        """IDLE-a. The nudge rides the ring like any event, and the undo arm retires a
+        restore on ANY later entry - so without neutrality the very sequence the nudge
+        makes commonest (finish, then nudge 60 s later) would put the row back to
+        stateless, which _resolve serves as `working`. That is the bug this whole wave
+        is about, re-entered through the fix for it."""
+        tracker, row, now = self.replayed(
+            ["turn finished", crabd.IDLE_NUDGE_EVENT])
+        self.assertEqual(row["state"], "done")
+
+    def test_an_idle_nudge_alone_restores_nothing(self):
+        tracker, row, now = self.replayed([crabd.IDLE_NUDGE_EVENT])
+        self.assertIsNone(row["state"])
+
+    def test_acknowledging_an_alert_does_not_retire_it_on_replay(self):
+        """The undo arm must fire on the kinds that MOVE the live state machine and on no
+        others. An ack is "I have seen it", not "it is answered" - `ack()` sets `acked`
+        and never touches `state`. Retiring the restore on one would mean the operator
+        silencing a real alert from the panel is what loses it across the next restart:
+        the alerts most likely to be acked are the ones that stood longest."""
+        tracker, row, now = self.replayed(
+            ["asked a question", crabd.HookTracker.ACK_EVENT])
+        self.assertEqual(row["state"], "needs_input")
+
+    def test_a_subagent_finishing_does_not_retire_a_question_on_replay(self):
+        """A bare `subagent finished` did not move the live row either - the 0.30.1
+        stand-down writes its OWN entry when it fires, so this kind alone means it did
+        not (inside the grace, or the alert was permission-owned)."""
+        tracker, row, now = self.replayed(["asked a question", "subagent finished"])
+        self.assertEqual(row["state"], "needs_input")
+
+    def test_an_external_note_does_not_retire_a_question_on_replay(self):
+        tracker, row, now = self.replayed(
+            ["asked a question", "continue queued: Keep going with what you were doing."])
+        self.assertEqual(row["state"], "needs_input")
+
+    def test_the_clear_events_DO_retire_a_question_on_replay(self):
+        """The other side of the same rule: these three each mean the alert ENDED, so a
+        restore past one would re-raise something already stood down."""
+        for kind in (crabd.NEEDS_INPUT_CLEARED_EVENT, crabd.SUBAGENT_CLEARED_EVENT,
+                     crabd.PERMISSION_CLEARED_EVENT):
+            with self.subTest(kind=kind):
+                tracker, row, now = self.replayed(["asked a question", kind])
+                self.assertIsNone(row["state"])
+
+    def test_a_new_prompt_still_retires_a_question_on_replay(self):
+        tracker, row, now = self.replayed(["asked a question", "prompt submitted"])
+        self.assertIsNone(row["state"])
 
     def test_a_real_restart_over_the_file_restores_done(self):
         """End to end over a real HistoryLog, not hand-built tuples."""
