@@ -381,8 +381,46 @@
    nothing and would push their sibling to the far edge. */
 
 @supports not (gap: 1px) {
+
+	/* ---- THE ROOT OF EVERYTHING BELOW ----
+
+	   .zones is `flex: 1 1 auto` with no stated height, and every height in the
+	   panel is a percentage of it: the band's 29%, the two zones' 71%, .crab's
+	   100%, and the `repeat(2, minmax(0, 1fr))` rows of the card grid. A flex
+	   item's height is definite enough for those percentages in a modern engine
+	   and NOT in this one, so all of them silently resolved to auto — which is
+	   one cause with four faces: the crab inflated to its intrinsic ratio, the
+	   band grew to hold it, the two zones fell off the bottom of the screen, and
+	   the grid rows sized to content so two cards filled the whole zone.
+
+	   Stating the height makes the whole chain resolvable again. flex-shrink is
+	   untouched, so the banner still gets its space on the rare frame it appears. */
+	.zones { height: 100%; }
+
 	@media (min-height: 421px) and (min-width: 641px) {
-		.zone-identity > * + * { margin-top: 0; margin-left: calc(var(--layout-unit) * 2.2); }
+		:root {
+			/* TUNE THESE TWO. Everything else in this block is derived. */
+			--legacy-crab-h: calc(var(--fs-clock) * 1.25);
+			--legacy-band-gap: calc(var(--layout-unit) * 6);
+			/* The band is the crab plus .zone's own padding, top and bottom. */
+			--legacy-band-h: calc(var(--legacy-crab-h) + var(--space-pad) * 2);
+		}
+
+		/* Restated rather than inherited: this block is the one that has to hold
+		   even if a later upstream edit moves the band's direction around. */
+		.zone-identity {
+			height: auto;
+			flex-direction: row;
+			align-items: center;
+			justify-content: center;
+		}
+		/* .clock is `width: 100%` at the authored slot, where the band is a COLUMN
+		   and 100% is the right answer. In a row it makes the clock as wide as the
+		   whole zone, which is what put it over the crab. The shared block already
+		   says `width: auto`; restated here because being wrong about this looks
+		   exactly like the gap being too small, and cost a round trip to tell apart. */
+		.clock { flex: 0 0 auto; width: auto; }
+		.zone-identity > * + * { margin-top: 0; margin-left: var(--legacy-band-gap); }
 
 		/* ---- the crab is sized to the clock, not to the row ----
 
@@ -413,16 +451,46 @@
 		   BECAUSE the crab below is given an explicit width in the same breath, which
 		   breaks that circularity. Restore any percentage width on .crab and the wrap
 		   collapses to zero and takes the clock with it. */
-		:root { --legacy-crab-h: calc(var(--fs-clock) * 1.25); }
 		.crab-wrap { flex: 0 0 auto; width: auto; }
 		.crab {
 			height: var(--legacy-crab-h);
 			max-height: var(--legacy-crab-h);
 			width: calc(var(--legacy-crab-h) * 1.182);
 		}
-		/* Without this the band keeps its 29% and the shorter crab buys nothing:
-		   the point of capping it is to let the two zones below move up. */
-		.zone-identity { height: auto; }
+		/* ---- the two zones take the exact remainder ----
+
+		   Not the 71% upstream states, because the band above is now `auto` rather
+		   than 29% and the two no longer add up. With .zones stated this resolves,
+		   which is what finally gives .cards a definite height — and a definite
+		   height is the whole reason `grid-template-rows: repeat(2, minmax(0, 1fr))`
+		   can put eight cards on the glass instead of letting two fill the zone.
+		   The 1px is .zone-identity's border-bottom. */
+		.zone-limits,
+		.zone-grid { height: calc(100% - var(--legacy-band-h) - 1px); }
+
+		/* ---- the header stops writing over itself ----
+
+		   The <=3:2 block gives .session-count `white-space: normal; overflow:
+		   visible` so the day recap wraps instead of ellipsising — measured for an
+		   840px slot, where 437px of text had 302.6px of box. A flex item that is
+		   `flex: 0 1 auto; min-width: 0` and overflows VISIBLY paints outside its
+		   box when the row squeezes it, and with margin-left:auto holding it right,
+		   what it paints over is the "SESSIONS" label to its left.
+		   This slot is 1024px, not 840, so the base one-line behaviour fits far
+		   better here than it did there. Ellipsising the tail is the cost, and the
+		   whole recap is one tap away: .grid-head opens today's timeline. */
+		.session-count { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+		/* ---- give the density toggle back ----
+
+		   The <=3:2 block hides it as a space trim for an 840x696 slot. Compact is
+		   a THIRD grid row (12 cards, not 8) with smaller type and padding, and
+		   gridCapacity() reads both axes off the computed style, so the count
+		   follows the class with nothing else to change. Hiding the only control
+		   that reaches it costs more than the chip's own width does here.
+		   display copied from the history chip's .shown rule (sidecrab.css:1493) —
+		   .head-chip states no display of its own, being a <button>. */
+		.head-chip[data-density] { display: inline-flex; align-items: center; justify-content: center; }
 	}
 	@media (min-height: 421px) and (max-width: 640px) {
 		.zone-limits > * + * { margin-top: 0; margin-left: var(--space-gap); }
