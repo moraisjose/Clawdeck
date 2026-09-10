@@ -53,7 +53,10 @@
 	body.limits-two-extras .today-grid { grid-gap: calc(var(--layout-unit) * 3.4); }
 	.cards                             { grid-gap: var(--space-gap); }
 	body.density-compact .cards        { grid-gap: calc(var(--layout-unit) * 1.2); }
-	.week-grid                         { grid-row-gap: calc(var(--layout-unit) * 0.5); }
+	/* Both axes: this rule is the one place upstream splits gap into its two
+	   longhands, and a scan that stops at the first match reads only one of them. */
+	.week-grid                         { grid-column-gap: calc(var(--layout-unit) * 0.8);
+	                                     grid-row-gap: calc(var(--layout-unit) * 0.5); }
 
 	/* ---- flex columns: margin-top between siblings ---- */
 	.zone-identity > * + *                              { margin-top: calc(var(--layout-unit) * 2.2); }
@@ -131,6 +134,16 @@
 	.zone-limits > .sensors.shown    { margin-top: auto; }
 	.card-top > .card-age            { margin-left: auto; }
 	.grid-head > .session-count      { margin-left: auto; }
+
+	/* The one slot where .zone-limits turns into a ROW (sidecrab.css:3520). Not
+	   reachable on the iPad — 768px portrait is already past the 640px ceiling —
+	   but a fallback layer that silently covers only the slots someone happened to
+	   test is how the .week-grid column-gap above got missed in the first place. */
+	@media (max-aspect-ratio: 3/2) and (min-height: 421px) and (max-width: 640px) {
+		.zone-limits > * + * { margin-top: 0; margin-left: var(--space-gap); }
+		.zone-limits > .today,
+		.zone-limits > .sensors.shown { margin-top: 0; }
+	}
 }
 
 
@@ -176,16 +189,33 @@
 
 
 /* =====================================================================
-   3. inset — 3 declarations
+   3. inset — 5 declarations
    =====================================================================
 
    The shorthand is Safari 14.1. The longhands it expands to are as old as CSS
-   positioning, so this is a pure rewrite with no behavioural difference at all.
-   All three are full-bleed overlays (the alert glow, the flash, the week-strip
-   hit target) and each one loses its entire geometry without this. */
+   positioning, so this is a pure rewrite with no behavioural difference.
+
+   ALL FIVE ARE `position: absolute` WITH NO OTHER OFFSET, which is what makes
+   this the most destructive of the three gaps rather than the smallest. An
+   absolutely positioned box whose inset is dropped does not merely lose its
+   size — it falls back to its STATIC position, so it lands wherever it sat in
+   source order and shrinks to fit its content.
+
+   For .sheet and .sheet-backdrop that is the whole detail modal: instead of a
+   full-bleed overlay at z-index 60 it renders as an ordinary block at the end
+   of <body>, below the panel, with .sheet-panel then centring itself against
+   that collapsed box rather than the viewport. Which is exactly the reported
+   symptom — "opens below the page, everything unformatted".
+
+   These two were missed on the first pass because they are written inline in
+   single-line rules and the scan that found the other three was anchored to the
+   start of a line. The lesson is in the commit: scan CSS with a parser, or at
+   minimum without an anchor. */
 
 @supports not (inset: 0) {
 	.glow,
 	.flash,
-	.week-hit { top: 0; right: 0; bottom: 0; left: 0; }
+	.week-hit,
+	.sheet,
+	.sheet-backdrop { top: 0; right: 0; bottom: 0; left: 0; }
 }
