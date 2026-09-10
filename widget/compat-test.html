@@ -63,6 +63,11 @@
 </div>
 
 <table id="out"></table>
+
+<h1 style="margin-top:22px">Media queries do sidecrab.css</h1>
+<p class="sub">Quais das 8 queries do stylesheet casam neste ecra, agora.</p>
+<table id="mq"></table>
+
 <div id="env"></div>
 
 <script>
@@ -124,6 +129,32 @@
 				'<td class="v">' + r.detail + '</td></tr>';
 	}
 	document.getElementById('out').innerHTML = html;
+
+	/* --- as media queries reais do sidecrab.css, por ordem de ficheiro ---
+	   A que decide a zona Limits e a NEAR-SQUARE: e a unica que volta a por
+	   .zone-limits em display:flex depois de (max-width: 1200px) a esconder. */
+	var MQ = [
+		['(max-width: 1800px)', 'slot estreito'],
+		['(max-width: 1200px)', 'ESCONDE .zone-limits'],
+		['(max-height: 420px)', 'slot baixo'],
+		['(max-aspect-ratio: 3/2) and (min-height: 421px)', 'partilhada <=3:2'],
+		['(max-aspect-ratio: 3/2) and (min-height: 421px) and (min-width: 641px)', 'NEAR-SQUARE -> MOSTRA .zone-limits'],
+		['(max-aspect-ratio: 3/2) and (min-height: 421px) and (max-width: 640px)', 'PORTRAIT estreito'],
+		['(max-aspect-ratio: 3/2) and (max-height: 420px)', 'CD-33 curto'],
+		['(prefers-reduced-motion: reduce)', 'movimento reduzido']
+	];
+	var mqHtml = '';
+	for (var k = 0; k < MQ.length; k++) {
+		var q = MQ[k][0], why = MQ[k][1], hit = null;
+		try { hit = window.matchMedia ? window.matchMedia(q).matches : null; }
+		catch (e) { hit = null; }
+		var c = hit === null ? 'info' : (hit ? 'pass' : 'fail');
+		var m = hit === null ? '?' : (hit ? 'CASA' : 'nao');
+		mqHtml += '<tr><td class="v" style="width:52%">' + q + '</td>' +
+				  '<td class="r ' + c + '">' + m + '</td>' +
+				  '<td class="n">' + why + '</td></tr>';
+	}
+	document.getElementById('mq').innerHTML = mqHtml;
 
 	document.getElementById('env').innerHTML =
 		'viewport ' + window.innerWidth + ' x ' + window.innerHeight +
