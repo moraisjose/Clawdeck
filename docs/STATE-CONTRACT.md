@@ -14,6 +14,81 @@
 > The "Schema 6" section below is retitled in place: its FIELDS are unchanged and live; only
 > the schema NUMBER they ride on is now 5.
 
+## v0.30.2 (2026-09-10 — BEHAVIOUR; schema stays 5, no field added or removed)
+
+No shape change. What changes is **what counts as a session doing something** — the clock
+`lastActivityAt` reports and the whole aging block in `_resolve` runs on. crabd `VERSION` → `0.30.2`.
+
+### 1. THE GAP — a dead session held out of `idle` by its own metadata
+
+Reported by the operator: sessions reading `working` on the panel that were not running at all.
+
+`lastActivityAt` was a max over transcript file **mtimes**. But Claude Code appends record kinds to
+a transcript long after the turn that produced it — **`ai-title`**, **`last-prompt`**,
+**`atis-latch`** — and not one of them carries a `timestamp` of its own. Every one still bumps the
+mtime. So a finished session's idle clock was reset by its own metadata, and the 15-minute decay
+that is the only exit for a session with no `SessionEnd` hook never arrived.
+
+Measured across nine live rows, mtime against newest **dated** record:
+
+| Session | mtime | newest dated record | gap |
+|---|---|---|---|
+| ADR analysis e cleanup | 13:34:48 | 13:22:05 | **12 min** |
+| Supermodular-os APM setup | 13:23:35 | 10:27:35 | **2 h 56 m** |
+| Clawdeck repository analysis | 12:45:26 | 11:00:03 | **1 h 45 m** |
+
+The 12-minute one was a session **genuinely waiting on the operator**, held out of `idle` by
+nothing but a title being written behind it.
+
+### 2. THE CLOCK — `FileFacts.activity_ts()`
+
+Per file: `min(mtime, last_ts)` when crabd has dated any record in it, else the mtime.
+
+- **`min`, not the bare record clock.** A record dated ahead of the file it lives in (an NTP step, a
+  transcript copied in from another host) must not buy freshness the file cannot vouch for — the
+  same clamp `note_activity` applies, for the same reason.
+- **`last_ts` of 0 falls back to the mtime.** That means crabd has dated *nothing* in this file, so
+  the mtime is all there is: a brand-new transcript, or any shape the parser cannot date, keeps
+  reading as alive rather than being silently retired.
+- **`transcript_age` is deliberately NOT changed.** The continue queue's liveness check wants "the
+  FILE moved" and says so in its own comment; this is the other question.
+
+### 3. WHAT THIS DOES NOT FIX, and why
+
+A session that stops writing and has **no `SessionEnd` hook** still reads `working` until the
+15-minute decay. There is no other evidence: crabd cannot distinguish "stopped" from "thinking".
+That is the case for any session started before the hooks were installed — it fires no hooks at all,
+for its whole life, because Claude Code reads `settings.json` once at session start.
+
+### 4. A `needs_input` now SURVIVES a crabd restart (RESTART-a)
+
+`replay` restores `asked a question` to `needs_input`. It used to refuse, on the reasoning that the
+history file holds no question text and `needs_input` is the one state `_resolve` never ages away —
+so a restored one would "alert forever, with nothing to say and no way to clear it".
+
+**The second half of that expired.** Since v0.19.0 the transcript's turn clock clears a
+`needs_input` on evidence the model ran again, and since v0.30.1 a `SubagentStop` clears one.
+Neither needs the question text. A restored question is bounded by the same two signals a live one
+is, and the only thing that does *not* clear it is silence — the exact case where the alert is real.
+
+Measured 2026-09-10, which is what forced this: a restart at 13:26 left every waiting session
+stateless, `_resolve` served them all as `working`, and the panel claimed sessions were running
+while they sat on an unanswered question — until each aged to `idle`. A textless alert is a shape
+the panel already renders (a `Notification` with no `message`, `lastEvent` → `"waiting on you"`); a
+wrong `working` is not.
+
+The restored card carries `question: null` and `lastEvent: "waiting on you"`. The **residual**: a
+question answered *during* the restart window comes back already spent. The undo arm catches it
+whenever the answer left a later ring entry, and the turn clock clears the rest on the session's
+next round-trip.
+
+### 5. WHAT STILL IS NOT FIXED
+
+A session that stops writing and has **no `SessionEnd` hook** still reads `working` until the
+15-minute decay. There is no other evidence: crabd cannot distinguish "stopped" from "thinking".
+That is the case for any session started before the hooks were installed — it fires no hooks at all
+for its whole life, because Claude Code reads `settings.json` once at session start.
+
 ## v0.30.1 (2026-09-10 — BEHAVIOUR; schema stays 5, no field added or removed)
 
 No shape change: `schema` stays **5** and no widget import is needed. What changes is, again,

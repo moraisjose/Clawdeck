@@ -75,7 +75,7 @@ from pathlib import Path, PureWindowsPath
 # does NOT - the .icuewidget import is a double-click at the iCUE console - so shipping
 # schema N+1 dead-feeds the on-glass panel until someone stands at the desk.
 SCHEMA_BREAKING = 5
-VERSION = "0.30.1"
+VERSION = "0.30.2"
 
 HOST = "127.0.0.1"
 # 2722 is the production port and the Scheduled Task owns it. CRABD_PORT exists so a
@@ -651,6 +651,11 @@ EXPIRY_POLL_SEC = 30.0
 #     "token activity" does not exist here. note_external's docstring already forbids
 #     telemetry moving the state machine, and an api_error is evidence of a FAILING
 #     request - the opposite of the block being released.
+# The card's `lastEvent` for a question with no text of its own: a Notification that
+# arrived with no `message`, and (RESTART-a) a question restored by replay, which the
+# history file cannot carry text for. One constant because the two must render alike -
+# the restored card is not a second shape the panel has to know about.
+WAITING_LABEL = "waiting on you"
 NEEDS_INPUT_CLEARED_EVENT = "answered outside the panel"
 # DISPATCH-a (operator-reported, 2026-09-10). THE GAP THE SIGNAL ABOVE CANNOT CLOSE: a
 # DISPATCHER parks its own model while its subagents run, so the CLI's 60 s idle
@@ -2095,46 +2100,6 @@ class FileFacts:
         with self._lock:
             return dict(self.agent_labels)
 
-    def refresh(self) -> bool:
-        """Parse whatever is new. Returns True when the file changed."""
-        try:
-            st = self.path.stat()
-        except OSError:
-            return False
-        if st.st_size == self.size and st.st_mtime == self.mtime and self.offset:
-            return False
-        if st.st_size < self.offset:
-            self.reset()  # truncated or rewritten -> full re-read
-        try:
-            with self.path.open("rb") as fh:
-                fh.seek(self.offset)
-                chunk = fh.read()
-                self.offset = fh.tell()
-        except OSError:
-            return False
-        self.size, self.mtime = st.st_size, st.st_mtime
-        data = self.pending + chunk
-        lines = data.split(b"\n")
-        self.pending = lines.pop()  # trailing partial line; completed on the next pass
-        # The lock spans the whole consume run, not each write: a reader must not see a
-        # half-applied file (requests inserted but context_ts not yet moved), and one
-        # acquire per refresh is cheaper than one per line.
-        with self._lock:
-            for raw in lines:
-                if raw.strip():
-                    self._consume(raw)
-        return True
-
-    def usage_records(self) -> dict[str, tuple[float, int, int, int, int, str | None]]:
-        """A COPY of the usage records, taken under the file's own lock - see __init__."""
-        with self._lock:
-            return dict(self.requests)
-
-    def labels(self) -> dict[str, str]:
-        """A COPY of the subagent labels, for the same reason usage_records() copies."""
-        with self._lock:
-            return dict(self.agent_labels)
-
     def activity_ts(self) -> float:
         """When this file's SESSION last did something - the clock `_resolve` ages on.
 
@@ -2512,7 +2477,11 @@ class HookTracker:
     # Replayed ring kinds that say the turn is OVER, and the state each restores
     # (CD-07). Keyed on EVENT_TEXT's values because that is what the history file
     # holds - a kind, never a state name. See replay() for why only these two.
-    REPLAY_TERMINAL = {EVENT_TEXT["Stop"]: "done", EVENT_TEXT["SessionEnd"]: "gone"}
+    # RESTART-a (v0.30.2): `asked a question` joined, and the name went with it - the
+    # set is no longer only about turns that ENDED. See replay() for why the objection
+    # that kept it out expired.
+    REPLAY_STATES = {EVENT_TEXT["Stop"]: "done", EVENT_TEXT["SessionEnd"]: "gone",
+                     EVENT_TEXT["Notification"]: "needs_input"}
     def __init__(self, history: "HistoryLog | None" = None) -> None:
         self._lock = threading.Lock()
         self.sessions: dict[str, dict] = {}
@@ -2606,7 +2575,7 @@ class HookTracker:
             previous_question = row["question"]
             if state == "needs_input":
                 # lastEvent is the short line; `question` keeps the hook's full text.
-                label = _trim(payload.get("message"), EVENT_MAX) or "waiting on you"
+                label = _trim(payload.get("message"), EVENT_MAX) or WAITING_LABEL
                 row["question"] = _trim_question(payload.get("message"))
                 # A-02 (v0.26.0). A Notification landing on a needs_input row TRANSFERS the
                 # alert's ownership to itself: `permission_alert` is relinquished here,
@@ -2883,10 +2852,28 @@ class HookTracker:
         which is a fact about the past like the ring and the tallies. Restoring them
         lets _resolve retire the row on its own schedule (DONE_DROP_SEC, then gone).
 
-        Nothing else is mapped. `asked a question` in particular is NOT restored to
-        needs_input: the history file holds no question text (by design), and
-        needs_input is the one state _resolve never ages away - so a restored one would
-        alert forever, with nothing to say and no way to clear it.
+        A QUESTION IS RESTORED (RESTART-a, v0.30.2), and this docstring used to say the
+        opposite. The old reasoning was: the history file holds no question text (still
+        true), and needs_input is the one state _resolve never ages away - so a restored
+        one would alert forever, "with nothing to say and no way to clear it".
+
+        The second half of that expired. Since v0.19.0 the transcript's turn clock clears
+        a needs_input on evidence the model ran again, and since 0.30.1 a SubagentStop
+        clears one; neither needs the question text. So a restored question is bounded by
+        the same two signals a live one is, and the only thing that does NOT clear it is
+        silence - which is exactly the case where the alert is real.
+
+        What the non-action cost is not hypothetical. MEASURED 2026-09-10: a restart at
+        13:26 left every waiting session stateless, _resolve served them all as `working`,
+        and the panel claimed sessions were running while they sat on an unanswered
+        question - the loudest feature of the product, silently inverted, for as long as
+        it took each row to age to `idle`. A textless alert is a shape the panel already
+        renders (a Notification with no `message`); a wrong `working` is not.
+
+        The residual, and it is the honest one: a question ANSWERED during the restart
+        window comes back as an alert that was already spent. The undo arm below catches
+        it whenever the answer left a later ring entry, and the turn clock clears the
+        rest on the session's next round-trip.
         """
         now = time.time()
         done_cutoff = now - RECAP_DONE_KEEP_SEC
@@ -2911,8 +2898,8 @@ class HookTracker:
                 # Entries arrive oldest first, so head-inserting each one leaves the
                 # ring newest-first - the same order a live run produces.
                 self._note_event(row, kind, ts, persist=False)
-                if self.REPLAY_TERMINAL.get(kind) and ts >= terminal.get(sid, (0.0,))[0]:
-                    terminal[sid] = (ts, self.REPLAY_TERMINAL[kind])
+                if self.REPLAY_STATES.get(kind) and ts >= terminal.get(sid, (0.0,))[0]:
+                    terminal[sid] = (ts, self.REPLAY_STATES[kind])
                 elif sid in terminal and ts >= terminal[sid][0]:
                     del terminal[sid]
             for sid, (ts, state) in terminal.items():
@@ -2920,8 +2907,10 @@ class HookTracker:
                 row["state"] = state
                 row["since"] = ts
                 # No label: _sessions falls back to _implied_event, so a restored card
-                # reads "finished" rather than a hook label this process never saw.
-                row["last_event"] = None
+                # reads "finished" rather than a hook label this process never saw. The
+                # exception is a restored QUESTION - _implied_event has no entry for
+                # needs_input, so the fallback would put the bare state name on the card.
+                row["last_event"] = WAITING_LABEL if state == "needs_input" else None
 
     def done_today(self, now: float | None = None) -> int:
         """recap.doneToday - DISTINCT sessions that reached `done` since local midnight.
@@ -5438,7 +5427,8 @@ class StateBuilder:
         # (CRB-F2). See TranscriptStore's docstring.
         for facts in self.store.snapshot():
             row = per_session.setdefault(facts.session_id, self._blank_session())
-            row["mtime"] = max(row["mtime"], facts.mtime)
+            # STALE-a: the file's own record clock, not its mtime - see activity_ts.
+            row["mtime"] = max(row["mtime"], facts.activity_ts())
             if facts.is_subagent:
                 row["sub_total"] += 1
                 if now - facts.mtime <= SUBAGENT_ACTIVE_SEC:

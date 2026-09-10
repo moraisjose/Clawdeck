@@ -722,6 +722,75 @@ class StateSerializationTests(unittest.TestCase):
         self.assertEqual(json.loads(crabd.dump_state(payload))["schema"], 5)
 
 
+class UndatedWriteIsNotActivityTests(TempProjects):
+    """A file write carrying no record of its own is not the session doing something
+    (STALE-a).
+
+    THE GAP. `lastActivityAt` - and therefore the whole aging block in `_resolve` - is a
+    max over transcript file MTIMES. But Claude Code writes several record kinds into a
+    transcript long after the turn that produced it: `ai-title`, `last-prompt`,
+    `atis-latch`. None carries a `timestamp`, and every one of them bumps the mtime. So a
+    dead session's idle clock is reset by its own metadata, and it can sit on the panel
+    reading `working` indefinitely.
+
+    Measured live 2026-09-10 across nine served rows: three had an mtime AHEAD of their
+    newest dated record - by 12 min, 1 h 45 m and 2 h 56 m. The 12-minute one was a
+    session genuinely waiting on the operator, held out of `idle` by nothing but a
+    metadata write.
+
+    The file's own records are the honest clock, and the fallback stays mtime for a file
+    crabd has parsed no dated record from - which is what keeps a brand-new transcript
+    (and any shape the parser does not date) reading as alive.
+    """
+
+    def row(self, doc, sid):
+        return next(s for s in doc["sessions"] if s["id"] == sid)
+
+    def test_a_metadata_write_does_not_hold_a_quiet_session_out_of_idle(self):
+        now = time.time()
+        quiet = now - (crabd.IDLE_AFTER_SEC + 120)
+        write_jsonl(self.session_path("s-stale"), [
+            user_line("do the thing", quiet - 10),
+            assistant_line("req-1", quiet),
+            # The late metadata Claude Code appends: no timestamp of its own.
+            {"type": "ai-title", "aiTitle": "a title written after the fact"},
+        ], mtime=now)          # ...and the write bumped the mtime to NOW
+        _, doc = self.build(now=now)
+        self.assertEqual(self.row(doc, "s-stale")["state"], "idle")
+
+    def test_a_dated_record_still_counts_as_activity(self):
+        """The guard on the fix: a session writing REAL records is untouched."""
+        now = time.time()
+        write_jsonl(self.session_path("s-live"), [
+            user_line("do the thing", now - 20),
+            assistant_line("req-1", now - 10),
+        ], mtime=now)
+        _, doc = self.build(now=now)
+        self.assertEqual(self.row(doc, "s-live")["state"], "working")
+
+    def test_a_transcript_with_no_dated_record_falls_back_to_its_mtime(self):
+        """A file crabd could date nothing in must keep reading as alive off its mtime,
+        or a shape the parser does not understand would silently retire the session."""
+        now = time.time()
+        write_jsonl(self.session_path("s-undated"), [
+            {"type": "ai-title", "aiTitle": "nothing here carries a timestamp"},
+        ], mtime=now)
+        _, doc = self.build(now=now)
+        self.assertEqual(self.row(doc, "s-undated")["state"], "working")
+
+    def test_the_served_last_activity_reports_the_record_clock(self):
+        now = time.time()
+        quiet = now - 600
+        write_jsonl(self.session_path("s-report"), [
+            user_line("do the thing", quiet - 10),
+            assistant_line("req-1", quiet),
+            {"type": "ai-title", "aiTitle": "late"},
+        ], mtime=now)
+        _, doc = self.build(now=now)
+        served = crabd._parse_ts(self.row(doc, "s-report")["lastActivityAt"])
+        self.assertAlmostEqual(served, quiet, delta=2)
+
+
 class FileFactsConcurrencyTests(TempProjects):
     """CRB-F2's SECOND HALF. The store lock made `files` safe to iterate; it never
     covered the mutable state INSIDE a FileFacts, which build()'s session loop reads
@@ -3274,7 +3343,7 @@ class ActionEndpointTests(ServedOverASocket):
         are all additive and none moves it."""
         self.assertEqual(self.state()["schema"], 5)
         self.assertEqual(crabd.SCHEMA_BREAKING, 5)
-        self.assertEqual(crabd.VERSION, "0.30.1")
+        self.assertEqual(crabd.VERSION, "0.30.2")
 
     def test_the_v6_fields_ride_on_schema_5_in_the_served_document(self):
         """The compat contract in ONE test: the fields the deployed v0.5.0 widget has
@@ -4936,13 +5005,25 @@ class HookReplayTests(HistoryTempFile):
         self.assertEqual(len(events), crabd.EVENTS_CAP)
         self.assertEqual(events[0]["text"], "turn finished")
 
-    def test_replay_restores_facts_but_never_state(self):
+    def test_replay_never_restores_a_running_state(self):
         """A 'working' row from before the restart would claim a turn is running that
-        this process has no hook to finish."""
+        this process has no hook to finish. This is what the rule has always been about;
+        it used to be asserted through a Notification, which since v0.30.2 restores
+        (RESTART-a) and so no longer exercises it. A prompt does."""
+        first = crabd.HookTracker(history=self.log())
+        self.hook(first, "UserPromptSubmit", self.SID_A)
+        row = self.restart().snapshot()[self.SID_A]
+        self.assertIsNone(row["state"])
+        self.assertEqual([e["text"] for e in row["events"]], ["prompt submitted"])
+
+    def test_a_replayed_question_carries_no_text_and_no_ack(self):
+        """The facts half of the old test. The question TEXT is deliberately not in the
+        history file, so a restored alert must not invent one - and it must arrive
+        unacked, or an alert the operator never saw would land pre-silenced."""
         first = crabd.HookTracker(history=self.log())
         self.hook(first, "Notification", self.SID_A, message="which host?")
         row = self.restart().snapshot()[self.SID_A]
-        self.assertIsNone(row["state"])
+        self.assertEqual(row["state"], "needs_input")
         self.assertIsNone(row["question"])
         self.assertFalse(row["acked"])
         self.assertEqual([e["text"] for e in row["events"]], ["asked a question"])
@@ -6038,7 +6119,7 @@ class HistoryEndpointTests(ServedOverASocket):
 
     def test_state_and_health_are_untouched_by_the_new_route(self):
         self.assertIn("schema", self.state())
-        self.assertEqual(self.client.get("/v1/health").json()["version"], "0.30.1")
+        self.assertEqual(self.client.get("/v1/health").json()["version"], "0.30.2")
 
     def test_the_endpoint_does_not_write_to_the_history_file(self):
         """Read-only by contract. A GET that touched the file would also invalidate its
@@ -8975,12 +9056,46 @@ class ReplayRestoresTerminalStateTests(HistoryTempFile):
         self.assertEqual(crabd.StateBuilder._resolve(row, 0.0, row["at"], now)[0],
                          "working")
 
-    def test_a_replayed_question_is_never_restored_as_needs_input(self):
-        """Deliberate non-action. The history file holds no question text, and
-        needs_input is the one state _resolve never ages away - a restored one would
-        alert forever with nothing to say."""
+    def test_a_replayed_question_is_restored_as_needs_input(self):
+        """RESTART-a (2026-09-10). This test used to pin the OPPOSITE, on the reasoning
+        that a restored question "would alert forever with nothing to say" - and half of
+        that reasoning has since expired. `nothing to say` still holds: the history file
+        carries no question text. `alert forever` does NOT, and has not since v0.19.0:
+        the turn clock clears a needs_input on evidence the model ran again, and since
+        0.30.1 a SubagentStop clears one too. Neither needs the question text.
+
+        What the old non-action cost, measured live: a crabd restart at 13:26 turned
+        every waiting session into `working` - _resolve's fallback for a stateless row -
+        and the operator watched the panel claim sessions were running while they sat
+        waiting on an answer. Silence is the one thing that CANNOT clear a real
+        question, so the row that survives here is the row that should."""
         tracker, row, now = self.replayed(["asked a question"])
+        self.assertEqual(row["state"], "needs_input")
+        self.assertEqual(crabd.StateBuilder._resolve(row, 0.0, row["at"], now)[0],
+                         "needs_input")
+
+    def test_a_restored_question_carries_the_textless_waiting_label(self):
+        """The history holds no question text, so the restored card reads exactly as a
+        Notification that arrived with no message does - a shape the panel already has."""
+        tracker, row, now = self.replayed(["asked a question"])
+        self.assertEqual(row["last_event"], crabd.WAITING_LABEL)
+        self.assertIsNone(row["question"])
+
+    def test_a_restored_question_is_still_clearable(self):
+        """The half of the old reasoning that expired, pinned. If this ever fails, the
+        non-action above becomes correct again and should be put back."""
+        tracker, row, now = self.replayed(["asked a question"])
+        self.assertTrue(tracker.note_activity(self.SID, now))
+        self.assertEqual(tracker.snapshot()[self.SID]["state"], "working")
+
+    def test_a_question_already_answered_before_the_restart_is_not_restored(self):
+        """The undo arm, as for `done`: a later event means the question is spent."""
+        tracker, row, now = self.replayed(["asked a question", "prompt submitted"])
         self.assertIsNone(row["state"])
+
+    def test_a_question_after_a_finish_wins_over_the_finish(self):
+        tracker, row, now = self.replayed(["turn finished", "asked a question"])
+        self.assertEqual(row["state"], "needs_input")
 
     def test_a_real_restart_over_the_file_restores_done(self):
         """End to end over a real HistoryLog, not hand-built tuples."""
