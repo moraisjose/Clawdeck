@@ -18,7 +18,8 @@ detail of every additive field and is the source of truth; this file is the shor
 
 - **0.31.0 crabd + widget (2026-09-10)** - the panel shows OpenCode too. Session cards now say
   which agent they belong to with a small pixel mark beside the state dot - a crab for Claude Code,
-  a terminal prompt for OpenCode - and the mark is on BOTH kinds, because a card with no marking is
+  the OpenCode mark for OpenCode, the same two icons Orca shows beside these agents - and
+  the mark is on BOTH kinds, because a card with no marking is
   ambiguous to anyone who has not memorised which agent is the default. Today's OpenCode tokens get
   their own muted line under the burn stats, deliberately NOT summed into the Claude figures: the
   gauges above measure the Anthropic account, and one merged total would read as if that account

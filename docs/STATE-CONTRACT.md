@@ -29,9 +29,17 @@ Widget reading, and it is three different answers to three inputs:
 
 | `client` | Glyph |
 |---|---|
-| absent | the crab — a crabd older than this serves no member and on that feed every session **is** Claude |
+| absent | Anthropic's mark — a crabd older than this serves no member and on that feed every session **is** Claude |
 | known | that client's own mark |
-| unknown string | **none** — a future crabd may serve a third client; drawing it as a crab is a confident lie |
+| unknown string | **none** — a future crabd may serve a third client; drawing it as Claude is a confident lie |
+
+The marks are the **real** ones, taken from the icons Orca shows beside these same two agents, so
+the panel and the window the operator already has open name the same thing the same way. Each keeps
+its own `viewBox` (24 and 512, the OpenCode one cropped to its artwork) — rescaling brand artwork
+onto a shared grid is how a logo ends up subtly wrong. Rendered **monochrome** through
+`currentColor`: Anthropic's orange is a near neighbour of both this panel's `--accent` and its amber
+state colour, and on this glass colour means *state*, so a brand-coloured mark on every Claude card
+would read as a state the card is not in.
 
 ### 2. `opencode` — a top-level block BESIDE `burn`
 

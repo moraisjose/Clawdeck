@@ -1022,28 +1022,42 @@ function logLine(msg) {
    Drawn as <rect>s on the SAME 8x8 grid as each other, in the crab's own idiom
    (shape-rendering: crispEdges, integer cells). One grid rather than one viewBox per
    mark, so the two line up in the card row instead of each floating in its own box. */
-var CLIENT_GLYPH_BOX = 8;
+/* The two marks, and they are the REAL ones: lifted from the icons Orca puts beside
+   these same two agents, so the panel and the window the operator already has open
+   name the same thing the same way. Recognition is the whole job here — a mark that is
+   merely "in the spirit of" the logo is one the eye has to stop and decode.
+
+   EACH KEEPS ITS OWN viewBox. They are brand artwork drawn on different coordinate
+   systems (24 and 512); rescaling one onto the other's grid is exactly how a logo ends
+   up subtly wrong. The CSS gives them a common rendered size instead.
+
+   MONOCHROME, via currentColor. Anthropic's own orange is a near neighbour of this
+   panel's --accent AND of its amber state colour, and on this glass colour MEANS state:
+   a brand-coloured mark on every Claude card would read as a state the card is not in.
+   Identity is carried by the shape, which is what survives being small anyway. */
 var CLIENT_GLYPHS = {
-	/* The crab, reduced until it survives 8 cells: a wide body, two claws held out at
-	   the sides, two legs. At this size the SILHOUETTE is the whole recognition — the
-	   eyes and the accessories that carry the big crab's mood do not survive, and
-	   faking them would just muddy the outline. */
-	'claude-code':
-		'<rect x="2" y="2" width="4" height="3"/>' +
-		'<rect x="0" y="3" width="2" height="1"/>' +
-		'<rect x="6" y="3" width="2" height="1"/>' +
-		'<rect x="2" y="5" width="1" height="2"/>' +
-		'<rect x="5" y="5" width="1" height="2"/>',
-	/* A terminal prompt: a chevron and a caret rule. Chosen to contrast on the axis
-	   that survives shrinking — the crab is solid, wide and horizontal, this is open,
-	   angular and diagonal. Two blobs of similar mass would be indistinguishable at
-	   the size that matters. */
-	opencode:
-		'<rect x="1" y="1" width="2" height="1"/>' +
-		'<rect x="3" y="2" width="2" height="1"/>' +
-		'<rect x="5" y="3" width="2" height="2"/>' +
-		'<rect x="3" y="5" width="2" height="1"/>' +
-		'<rect x="1" y="6" width="2" height="1"/>'
+	/* Anthropic's mark. One path, no fill rule needed. NOT drawn with crispEdges - the
+	   crab is pixel art and wants it, this is a smooth vector and would come out
+	   jagged. */
+	'claude-code': {
+		viewBox: '0 0 24 24',
+		paths: [{ d: 'M4.709 15.955l4.72-2.647.08-.23-.08-.128H9.2l-.79-.048-2.698-.073-2.339-.097-2.266-.122-.571-.121L0 11.784l.055-.352.48-.321.686.06 1.52.103 2.278.158 1.652.097 2.449.255h.389l.055-.157-.134-.098-.103-.097-2.358-1.596-2.552-1.688-1.336-.972-.724-.491-.364-.462-.158-1.008.656-.722.881.06.225.061.893.686 1.908 1.476 2.491 1.833.365.304.145-.103.019-.073-.164-.274-1.355-2.446-1.446-2.49-.644-1.032-.17-.619a2.97 2.97 0 01-.104-.729L6.283.134 6.696 0l.996.134.42.364.62 1.414 1.002 2.229 1.555 3.03.456.898.243.832.091.255h.158V9.01l.128-1.706.237-2.095.23-2.695.08-.76.376-.91.747-.492.584.28.48.685-.067.444-.286 1.851-.559 2.903-.364 1.942h.212l.243-.242.985-1.306 1.652-2.064.73-.82.85-.904.547-.431h1.033l.76 1.129-.34 1.166-1.064 1.347-.881 1.142-1.264 1.7-.79 1.36.073.11.188-.02 2.856-.606 1.543-.28 1.841-.315.833.388.091.395-.328.807-1.969.486-2.309.462-3.439.813-.042.03.049.061 1.549.146.662.036h1.622l3.02.225.79.522.474.638-.079.485-1.215.62-1.64-.389-3.829-.91-1.312-.329h-.182v.11l1.093 1.068 2.006 1.81 2.509 2.33.127.578-.322.455-.34-.049-2.205-1.657-.851-.747-1.926-1.62h-.128v.17l.444.649 2.345 3.521.122 1.08-.17.353-.608.213-.668-.122-1.374-1.925-1.415-2.167-1.143-1.943-.14.08-.674 7.254-.316.37-.729.28-.607-.461-.322-.747.322-1.476.389-1.924.315-1.53.286-1.9.17-.632-.012-.042-.14.018-1.434 1.967-2.18 2.945-1.726 1.845-.414.164-.717-.37.067-.662.401-.589 2.388-3.036 1.44-1.882.93-1.086-.006-.158h-.055L4.132 18.56l-1.13.146-.487-.456.061-.746.231-.243 1.908-1.312-.006.006z' }]
+	},
+	/* OpenCode's mark: a faded inner block and a frame. The evenodd rule on the second
+	   path is what punches the hole - without it the frame fills and the mark becomes a
+	   solid slab that reads as nothing. */
+	opencode: {
+		/* Cropped to the artwork's own bounds (x 128-384, y 96-416) rather than the
+		   512 box it ships in. That box is mostly padding, and left in it the mark
+		   renders at half the size of the Anthropic one beside it - the two have to
+		   look like a pair. Cropping does not distort: it removes margin, and the
+		   256x320 result stays portrait, which this mark is. */
+		viewBox: '128 96 256 320',
+		paths: [
+			{ d: 'M320 224V352H192V224H320Z', opacity: '0.28' },
+			{ d: 'M384 416H128V96H384V416ZM320 160H192V352H320V160Z', rule: 'evenodd' }
+		]
+	}
 };
 
 /* -> the glyph key for a row, or null for "draw no mark".
@@ -1066,22 +1080,37 @@ function clientKind(s) {
 	return Object.prototype.hasOwnProperty.call(CLIENT_GLYPHS, raw) ? raw : null;
 }
 
-/* The mark as an <svg>, or null. Built with innerHTML on a namespaced element
-   because createElementNS + one node per rect costs six nodes per card per render on
-   a 2012 A6X, and the markup is a constant this file owns — no feed value reaches it. */
+/* The mark as an <svg>, or null. Built node by node with createElementNS rather than
+   by setting innerHTML: innerHTML on an SVG element is not reliable on the legacy
+   WebKit this panel now runs on (iPad 4 / iOS 10.3), and each mark is one or two
+   paths, so the node count this costs is nothing. */
 function clientGlyphEl(s) {
 	var kind = clientKind(s);
 	if (!kind) return null;
-	var box = CLIENT_GLYPH_BOX;
-	var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+	var spec = CLIENT_GLYPHS[kind];
+	var NS = 'http://www.w3.org/2000/svg';
+	var svg = document.createElementNS(NS, 'svg');
 	svg.setAttribute('class', 'client-glyph');
-	svg.setAttribute('viewBox', '0 0 ' + box + ' ' + box);
-	svg.setAttribute('shape-rendering', 'crispEdges');
+	svg.setAttribute('viewBox', spec.viewBox);
 	svg.setAttribute('data-client', kind);
 	svg.setAttribute('role', 'img');
 	svg.setAttribute('aria-label', kind === 'opencode' ? 'OpenCode session'
 		: 'Claude Code session');
-	svg.innerHTML = CLIENT_GLYPHS[kind];
+	for (var i = 0; i < spec.paths.length; i++) {
+		var def = spec.paths[i];
+		var el = document.createElementNS(NS, 'path');
+		el.setAttribute('d', def.d);
+		el.setAttribute('fill', 'currentColor');
+		if (def.opacity) el.setAttribute('fill-opacity', def.opacity);
+		/* Both spellings: SVG 1.1 attribute for the legacy WebKit this panel runs on,
+		   and nothing else needed - a CSS property would not reach a node built here
+		   without a rule to match it. */
+		if (def.rule) {
+			el.setAttribute('fill-rule', def.rule);
+			el.setAttribute('clip-rule', def.rule);
+		}
+		svg.appendChild(el);
+	}
 	return svg;
 }
 

@@ -76,16 +76,28 @@ eq(W.clientKind(null), 'claude-code', 'a missing row does not throw');
 
 /* --------------------------------------------------------------- the glyph itself */
 
-ok(W.CLIENT_GLYPHS['claude-code'], 'the crab glyph exists');
-ok(W.CLIENT_GLYPHS.opencode, 'the opencode glyph exists');
-ok(W.CLIENT_GLYPHS['claude-code'] !== W.CLIENT_GLYPHS.opencode,
-	'the two glyphs are actually different marks');
-/* Both are drawn on ONE grid. A mark that needs its own viewBox would not line up
-   with its neighbour in the card row, which is the whole point of having two. */
-Object.keys(W.CLIENT_GLYPHS).forEach(function (kind) {
-	ok(/^(<rect [^>]*\/>)+$/.test(W.CLIENT_GLYPHS[kind].replace(/\s+/g, ' ').trim()),
-		kind + ' is pixel rects only — no paths, no per-glyph viewBox');
+/* These are the REAL marks, lifted from the ones Orca puts beside the same two
+   agents, so the two apps name the same thing the same way. Each keeps its OWN
+   viewBox: they are brand artwork on different coordinate systems (24 and 512), and
+   rescaling one onto the other's grid is how a logo ends up subtly wrong. */
+['claude-code', 'opencode'].forEach(function (kind) {
+	var g = W.CLIENT_GLYPHS[kind];
+	ok(g && typeof g.viewBox === 'string' && /^[-\d. ]+$/.test(g.viewBox),
+		kind + ' carries its own viewBox');
+	ok(g && Array.isArray(g.paths) && g.paths.length > 0, kind + ' has path data');
+	g.paths.forEach(function (path) {
+		ok(typeof path.d === 'string' && /^[Mm]/.test(path.d),
+			kind + ' path data starts at a move command');
+	});
 });
+ok(W.CLIENT_GLYPHS['claude-code'].paths[0].d !== W.CLIENT_GLYPHS.opencode.paths[0].d,
+	'the two are actually different marks');
+/* The OpenCode mark is a TWO-path logo: a faded inner block and a frame whose evenodd
+   rule punches the hole. Drop either and a framed block becomes a filled slab. */
+eq(W.CLIENT_GLYPHS.opencode.paths.length, 2, 'the opencode mark keeps both paths');
+ok(W.CLIENT_GLYPHS.opencode.paths[0].opacity, 'its inner block stays faded');
+eq(W.CLIENT_GLYPHS.opencode.paths[1].rule, 'evenodd',
+	'its frame keeps the fill rule that makes it a frame');
 
 /* ------------------------------------------------------- the stats line (OC-a) */
 

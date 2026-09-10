@@ -1625,7 +1625,10 @@ body.empty .grid-empty { display: flex; }
 	flex: 0 0 auto;
 	width: calc(var(--layout-unit) * 1.5);
 	height: calc(var(--layout-unit) * 1.5);
-	fill: var(--faint);
+	/* `color`, not `fill`: every path in these marks paints with currentColor, so a
+	   fill here would be overridden and the mark would inherit the card's TEXT colour
+	   instead - brighter than intended and competing with the title. */
+	color: var(--faint);
 	/* The optical centre of both marks sits a touch high against the text baseline
 	   this row is aligned on; the dot has no such problem because it is symmetric. */
 	position: relative;
