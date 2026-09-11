@@ -14,6 +14,88 @@
 > The "Schema 6" section below is retitled in place: its FIELDS are unchanged and live; only
 > the schema NUMBER they ride on is now 5.
 
+## v0.31.1 (2026-09-11 — ADDITIVE: `subagentDetail[].state`; schema stays 5)
+
+crabd `VERSION` → `0.31.1`. One additive member per subagent row, and a widening of what
+`subagentDetail` is allowed to contain.
+
+### 1. THE GAP — a session that launched eleven subagents showed nothing
+
+Operator-reported. `subagentDetail` carried **running** lanes only, and the panel's `N sub` badge
+was gated on `running > 0`. So a session whose whole fan-out had finished rendered nothing at all —
+no badge, no rows, and an empty sheet behind the tap. Measured on the operator's feed at the time:
+
+```
+Issue 115 rebase and PR    running=0  total=11  detail=0
+```
+
+The `11` was on the wire and no element on the panel rendered it.
+
+### 2. WHAT A SUBAGENT CANNOT BE, and it bounds the whole feature
+
+A subagent's transcript is attributed to the **parent's** session id (`TranscriptStore` yields
+`entry.name` for anything under `<session>/subagents/`). A subagent therefore has no id of its own,
+no hook channel, and **no `needs_input`** — a permission prompt raised during its work surfaces as
+the *parent's* `PermissionRequest`. Its only observable states are "its file moved recently" and
+"it stopped".
+
+This is also why subagents are **not** served as sessions. They have no identity to key a card on,
+none of the card's affordances (answer, ack, pin, dismiss, queue, approve) can reach one, and the
+parent is already `working` *because* they are — two rows for one unit of work makes "how many
+things are running?" unanswerable at a glance. The panel's own answer stands: the card carries the
+count, the sheet carries the list.
+
+### 3. `state` on each `subagentDetail` row
+
+`"working"` or `"done"`. Two independent evidences of finished, and both are needed:
+
+- a **matched `SubagentStop`** — the certain one (CD-29's matching rule is unchanged);
+- **quiet past `SUBAGENT_ACTIVE_SEC`** — which covers every lane no stop was seen for: a crabd that
+  started mid-run, a hook that never fired.
+
+Running lanes always sort **ahead** of finished ones. The sheet is read top-down and what is still
+running is what the operator is waiting on; a finished lane must never push a live one off the cap.
+
+A finished lane is kept for **`SUBAGENT_DONE_KEEP_SEC` (5 min)** and then drops off. That number is
+a retention rule, not a measurement: long enough that a fan-out landing while the operator is
+looking away is still there when they look back, short enough that the sheet is about *now* rather
+than being a log. History is what the day timeline is for.
+
+`subagents.total` is unchanged and is **not** windowed — it is the launch count and the badge's
+denominator. A total that shrank as lanes aged off would make the badge count backwards, which is
+worse than not counting: the operator would have to work out whether work had been undone.
+
+### 4. Widget
+
+The badge reads **live over launched** (`3/11 sub`) and appears whenever anything was ever
+launched, rather than only while something is running. Finished rows are marked with a hollow ring
+and a `done` suffix on the age — not by fading the row, because how long ago a lane finished is the
+one number a finished row is still carrying.
+
+### 5. Lanes on the CARD, on the scrolling grid only (SUB-b)
+
+Upstream hides `.card-subs` in compact density and is right to: on the 2560x720 glass, compact is a
+*third* grid row bought by dropping the secondary lines, and there is no height for lanes.
+
+That reasoning does not survive the iPad's scroll rule. There `.cards` has a definite height and
+**overflows**, so a taller card costs cards-per-screen rather than clipped content. So in that band
+— and only there — a card whose RUNNING list is non-empty takes a **second grid track**
+(`.card.has-lanes { grid-row: span 2 }`) and shows its lanes.
+
+Only that card grows. The alternative, raising `--legacy-card-row` for every card, measured at
+115.2px → ~175px (1vmin = 7.68px on a 1024×768 iPad) and took the visible count from about four to
+about two and a half — paying height on every card to show lanes on the few that have any.
+
+The **card** list and the **sheet** list are deliberately different. The card carries at most three
+*running* lanes: it is read from across the room to answer "what is happening now", and a lane that
+finished four minutes ago is context rather than an answer. The sheet carries every lane, finished
+included. The badge reports both halves in its `live/launched` ratio, so nothing is concealed — what
+differs is which question each surface answers.
+
+`gridCapacity()` counts tracks, not cards, so a spanning card makes it render one card more than
+fills the tracks. Harmless precisely because this grid scrolls: the surplus lands below the fold
+instead of being clipped, which is the reason the scroll rule exists.
+
 ## v0.31.0 (2026-09-10 — ADDITIVE: `client` per session + a top-level `opencode`; schema stays 5)
 
 crabd `VERSION` → `0.31.0`. The panel shows a SECOND agent. Two additive members, no shape

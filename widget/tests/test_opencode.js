@@ -122,5 +122,59 @@ ok(/\$1\.25/.test(W.opencodeLineText(
 eq(W.opencodeLineText({ today: null }), null, 'a malformed block does not throw');
 eq(W.opencodeLineText({}), null, 'a block with no today does not throw');
 
+/* ------------------------------------------------- the subagent badge (SUB-a) */
+
+/* The badge was `running + " sub"` and was gated on running > 0, so a session that
+   launched eleven subagents and finished them showed NOTHING - measured on the
+   operator's own feed: running=0, total=11, and the 11 rendered nowhere.
+
+   It now reads live-over-launched, and it appears whenever anything was ever
+   launched. The denominator is the launch count and never shrinks: a badge that
+   counted backwards as lanes aged out would be worse than no badge. */
+eq(W.subBadgeText({ subagents: { running: 3, total: 11 } }), '3/11 sub',
+	'live over launched');
+eq(W.subBadgeText({ subagents: { running: 0, total: 11 } }), '0/11 sub',
+	'a finished batch still says how many there were - the whole point of SUB-a');
+eq(W.subBadgeText({ subagents: { running: 0, total: 0 } }), null,
+	'a session that launched none gets no badge');
+eq(W.subBadgeText({}), null, 'a row with no subagents member does not throw');
+eq(W.subBadgeText({ subagents: { total: 2 } }), '0/2 sub',
+	'a missing running count reads as none running, not as unknown');
+eq(W.subBadgeText(null), null, 'a missing row does not throw');
+
+/* --------------------------------------------------- the subagent row (SUB-a) */
+
+eq(W.subRowState({ state: 'working' }), 'working', 'a running lane says so');
+eq(W.subRowState({ state: 'done' }), 'done', 'a finished lane says so');
+eq(W.subRowState({}), 'working',
+	'a crabd older than SUB-a sends no state, and everything it sends IS running');
+eq(W.subRowState({ state: 'nonsense' }), 'working',
+	'an unknown state falls back rather than styling the row as something it is not');
+
+/* ------------------------------------------- the ON-CARD lane list (SUB-b) */
+
+/* The card shows what is RUNNING; the sheet shows everything. The two lists are
+   deliberately different: a card is read from across the room to answer "what is
+   happening now", and a lane that finished four minutes ago is not that - it is
+   context, and context is what the tap is for. */
+function lanes(list) { return { subagentDetail: list }; }
+var L = [
+	{ label: 'a', state: 'working' }, { label: 'b', state: 'done' },
+	{ label: 'c', state: 'working' }, { label: 'd', state: 'done' },
+	{ label: 'e', state: 'working' }, { label: 'f', state: 'working' }
+];
+
+eq(W.cardSubList(lanes(L)).map(function (d) { return d.label; }).join(''), 'ace',
+	'the card lists running lanes only, in order');
+eq(W.cardSubList(lanes([{ label: 'a', state: 'done' }])).length, 0,
+	'a card whose lanes have all finished shows no rows - the badge still says 0/N');
+ok(W.cardSubList(lanes(L)).length <= W.CARD_SUB_ROWS_MAX,
+	'the on-card list is capped');
+eq(W.cardSubList(lanes([{ label: 'a' }])).length, 1,
+	'a crabd older than SUB-a sends no state and only ever listed running lanes');
+eq(W.cardSubList({}).length, 0, 'a row with no detail does not throw');
+/* The SHEET list is unfiltered - that is the difference between the two. */
+eq(W.subList(lanes(L)).length, 6, 'the sheet still gets every lane, finished included');
+
 console.log((failures ? 'FAILED' : 'ok') + '  ' + (checks - failures) + '/' + checks + ' checks');
 process.exit(failures ? 1 : 0);

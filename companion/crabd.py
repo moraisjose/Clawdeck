@@ -76,7 +76,7 @@ from pathlib import Path, PureWindowsPath
 # does NOT - the .icuewidget import is a double-click at the iCUE console - so shipping
 # schema N+1 dead-feeds the on-glass panel until someone stands at the desk.
 SCHEMA_BREAKING = 5
-VERSION = "0.31.0"
+VERSION = "0.31.1"
 
 HOST = "127.0.0.1"
 # 2722 is the production port and the Scheduled Task owns it. CRABD_PORT exists so a
@@ -289,6 +289,17 @@ EVENT_MAX = 120
 QUESTION_MAX = 500          # contract: `question` carries the FULL text, capped
 SUBAGENT_LABEL_MAX = 40
 SUBAGENT_DETAIL_CAP = 5
+# SUB-a (operator-reported, 2026-09-11). How long a FINISHED subagent stays on the list.
+# Before this, `subagentDetail` carried running lanes only and the panel's `N sub` badge
+# was gated on `running > 0` - so a session that launched eleven subagents and finished
+# them showed nothing at all. Measured on the operator's feed at the time:
+# `running=0 total=11 detail=0`, with the 11 on the wire and no element rendering it.
+#
+# Five minutes, and the number is a retention rule rather than a measurement: long enough
+# that a fan-out that lands while the operator is looking away is still there when they
+# look back, short enough that the sheet is about NOW and not a log. Past it the lane is
+# history, and the day timeline is what history is for.
+SUBAGENT_DONE_KEEP_SEC = 5 * 60
 # A transcript question older than this relative to the needs_input transition belongs
 # to an earlier turn - without the guard a resolved question re-surfaces on the panel.
 QUESTION_FRESH_SEC = 120
@@ -5738,8 +5749,13 @@ class StateBuilder:
             row["mtime"] = max(row["mtime"], facts.activity_ts())
             if facts.is_subagent:
                 row["sub_total"] += 1
-                if now - facts.mtime <= SUBAGENT_ACTIVE_SEC:
+                age = now - facts.mtime
+                if age <= SUBAGENT_ACTIVE_SEC:
                     row["sub_active"] += 1
+                # SUB-a: the FILE list reaches further back than the ACTIVE count, so a
+                # lane that has stopped can still be named. sub_active keeps its own
+                # narrower window - it is the badge's numerator and means "running now".
+                if age <= SUBAGENT_DONE_KEEP_SEC:
                     row["sub_files"].append(facts)
             else:
                 row["title"] = facts.title()
@@ -6293,9 +6309,11 @@ class StateBuilder:
         it degrades safely: a stop that matches nothing leaves the trim to `running` as
         the backstop, exactly as before.
         """
-        if running <= 0:
-            return []
         candidates = list(info["sub_files"])
+        # SUB-a: `stopped` is no longer a discard pile. A lane a SubagentStop claimed is
+        # the one thing crabd KNOWS has finished, and that is exactly what the operator
+        # wants to still see for a few minutes - so it is moved across, not dropped.
+        stopped = []
         for stop in sorted(stops):
             claimed = None
             for facts in candidates:
@@ -6305,13 +6323,39 @@ class StateBuilder:
                     claimed = facts
             if claimed is not None:
                 candidates.remove(claimed)
-        newest = sorted(candidates, key=lambda f: f.mtime, reverse=True)
+                stopped.append(claimed)
+
+        # Two evidences of "finished", and both are needed. A matched SubagentStop is the
+        # certain one; going quiet past SUBAGENT_ACTIVE_SEC is the one that covers every
+        # lane no stop was seen for - a crabd that started mid-run, a hook that never
+        # fired. Whatever is left over is running.
+        live, done = [], list(stopped)
+        for facts in candidates:
+            (live if now - facts.mtime <= SUBAGENT_ACTIVE_SEC else done).append(facts)
+        # `running` is the badge's numerator and it is computed upstream, so the LIVE half
+        # is trimmed to it rather than allowed to disagree - the panel must never name
+        # more lanes as running than the badge counts. The surplus is finished by the
+        # badge's own reckoning, so it moves across rather than disappearing.
+        live.sort(key=lambda f: f.mtime, reverse=True)
+        if running >= 0 and len(live) > running:
+            done.extend(live[running:])
+            live = live[:running]
+        done.sort(key=lambda f: f.mtime, reverse=True)
+
         detail = []
-        for facts in newest[:min(SUBAGENT_DETAIL_CAP, running)]:
+        # RUNNING FIRST, always. The sheet is read top-down and what is still running is
+        # what the operator is waiting on; a finished lane must never push a live one off
+        # the cap.
+        for facts, state in ([(f, "working") for f in live] +
+                             [(f, "done") for f in done])[:SUBAGENT_DETAIL_CAP]:
             agent_id = facts.agent_id()
             label = info["agent_labels"].get(agent_id) or facts.label()
             detail.append({"label": _trim(label, SUBAGENT_LABEL_MAX) or agent_id[:8],
-                           "ageSec": max(0, int(now - facts.mtime))})
+                           "ageSec": max(0, int(now - facts.mtime)),
+                           # SUB-a, additive. Presence-detected like every other member
+                           # added since schema 5: an older widget ignores it and renders
+                           # the row exactly as it does today.
+                           "state": state})
         return detail
 
     @staticmethod

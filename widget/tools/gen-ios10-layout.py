@@ -173,6 +173,32 @@ CORRECTIONS = """
 		.clock { flex: 0 0 auto; width: auto; }
 		.zone-identity > * + * { margin-top: 0; margin-left: var(--legacy-band-gap); }
 
+		/* ---- lanes on the card, not only behind a tap (SUB-b) ----
+
+		   Upstream hides `.card-subs` in compact density, and it is right to: on the
+		   2560x720 glass compact is a THIRD grid row bought by dropping the secondary
+		   lines, and there is no height for lanes. That reasoning does not survive the
+		   scroll rule above. Here the grid has a definite height and OVERFLOWS, so a
+		   taller card costs cards-per-screen rather than costing clipped content - and
+		   the operator asked to see running lanes without opening anything.
+
+		   ONLY THE CARD THAT HAS LANES GROWS. `.has-lanes` is set in JS on a card whose
+		   RUNNING list is non-empty, and it takes a second grid track; every other card
+		   is untouched and pays nothing. The alternative was raising --legacy-card-row
+		   for all of them, which on measurement (115.2px -> ~175px at 1vmin = 7.68px)
+		   took the visible count from about four to about two and a half to show lanes
+		   on the few cards that have any.
+
+		   The span also works past the four EXPLICIT tracks: cards beyond them land in
+		   implicit auto rows, where spanning two auto rows still sizes to content.
+
+		   gridCapacity() counts TRACKS, not cards, so a spanning card makes it render
+		   one card more than fills the tracks. That is harmless precisely because this
+		   grid scrolls: the surplus lands below the fold instead of being clipped, which
+		   is the whole reason the scroll rule exists. */
+		.card.has-lanes { grid-row: span 2; }
+		body.density-compact .card.has-lanes .card-subs { display: flex; }
+
 		/* ---- the crab is sized to the clock, not to the row ----
 
 		   .crab is `width: 100%; height: 100%` inside .crab-wrap, which is

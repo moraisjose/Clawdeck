@@ -2000,6 +2000,21 @@ body.quiet .card.writing.w2 .dot { transform: none; }
 }
 .sub-row.sub-more { color: var(--faint); }
 .sub-row.sub-more .sub-label::before { content: ""; }
+/* ---------- a finished lane (SUB-a) ---------- */
+
+/* A lane that has stopped stays on the list for SUBAGENT_DONE_KEEP_SEC so a fan-out
+   that lands while the operator is looking away is still there when they look back.
+   It has to be legible as finished WITHOUT being read first: the leading marker
+   changes from the running bullet to a hollow ring, which is the difference the eye
+   catches down a column, and the label steps back to --faint. Deliberately not
+   `opacity` on the row - that would fade the age too, and how long ago a lane
+   finished is the one number a done row is still carrying. */
+.sub-row[data-sub-state="done"] .sub-label { color: var(--faint); }
+.sub-row[data-sub-state="done"] .sub-label::before { content: "\25E6\00A0"; }
+.sub-row[data-sub-state="done"] .sub-age::after {
+	content: " done";
+	color: var(--faint);
+}
 
 .card-badges { display: flex; flex-wrap: wrap; gap: calc(var(--layout-unit) * 0.7); flex: 0 0 auto; }
 .badge {

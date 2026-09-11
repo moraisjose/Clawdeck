@@ -3105,8 +3105,10 @@ class SubagentDetailTests(TempProjects):
         self._sub(now, "a0b4bd4afffc19fd7", 10)
         _, state = self.build(now=now)
         row = next(r for r in state["sessions"] if r["id"] == self.SID)
+        # `state` joined the row in SUB-a; the rest of the shape is unchanged.
         self.assertEqual(row["subagentDetail"],
-                         [{"label": "crabd v0.2.0 lane", "ageSec": 10}])
+                         [{"label": "crabd v0.2.0 lane", "ageSec": 10,
+                           "state": "working"}])
 
     def test_label_falls_back_to_the_launch_prompt_excerpt(self):
         now = time.time()
@@ -3120,7 +3122,12 @@ class SubagentDetailTests(TempProjects):
         self.assertLessEqual(len(detail[0]["label"]), crabd.SUBAGENT_LABEL_MAX)
         self.assertTrue(detail[0]["label"].startswith("You are the widget lane"))
 
-    def test_only_running_subagents_appear_newest_first(self):
+    def test_running_subagents_come_first_newest_first_then_the_finished_one(self):
+        """Was `test_only_running_subagents_appear_newest_first` until SUB-a. The
+        RUNNING half is unchanged - same two lanes, same newest-first order - and the
+        finished one now follows them instead of vanishing. The ordering rule this test
+        was written for is the part that must not move: a finished lane can never push a
+        live one down the list."""
         now = time.time()
         write_jsonl(self.session_path(self.SID), [user_line("go", now - 300)],
                     mtime=now - 5)
@@ -3129,8 +3136,9 @@ class SubagentDetailTests(TempProjects):
         self._sub(now, "ccc", crabd.SUBAGENT_ACTIVE_SEC + 60, text="finished lane")
         _, state = self.build(now=now)
         row = next(r for r in state["sessions"] if r["id"] == self.SID)
-        self.assertEqual([d["label"] for d in row["subagentDetail"]],
-                         ["newest lane", "middle lane"])
+        self.assertEqual([(d["label"], d["state"]) for d in row["subagentDetail"]],
+                         [("newest lane", "working"), ("middle lane", "working"),
+                          ("finished lane", "done")])
         self.assertEqual(row["subagents"], {"running": 2, "total": 3})
 
     def test_detail_is_capped_at_five(self):
@@ -3431,7 +3439,7 @@ class ActionEndpointTests(ServedOverASocket):
         are all additive and none moves it."""
         self.assertEqual(self.state()["schema"], 5)
         self.assertEqual(crabd.SCHEMA_BREAKING, 5)
-        self.assertEqual(crabd.VERSION, "0.31.0")
+        self.assertEqual(crabd.VERSION, "0.31.1")
 
     def test_the_v6_fields_ride_on_schema_5_in_the_served_document(self):
         """The compat contract in ONE test: the fields the deployed v0.5.0 widget has
@@ -6207,7 +6215,7 @@ class HistoryEndpointTests(ServedOverASocket):
 
     def test_state_and_health_are_untouched_by_the_new_route(self):
         self.assertIn("schema", self.state())
-        self.assertEqual(self.client.get("/v1/health").json()["version"], "0.31.0")
+        self.assertEqual(self.client.get("/v1/health").json()["version"], "0.31.1")
 
     def test_the_endpoint_does_not_write_to_the_history_file(self):
         """Read-only by contract. A GET that touched the file would also invalidate its
@@ -9623,9 +9631,20 @@ class SubagentDetailNamesOnlyRunningAgentsTests(unittest.TestCase):
     NOW = 10000.0
 
     def detail(self, files, running, stops):
+        """-> the labels crabd names as RUNNING. Since SUB-a a finished lane is still
+        listed (marked `done`) for a few minutes, so the CD-29 finding is no longer
+        "it is absent" but "it is never called running" - which is what the finding
+        always actually was."""
         info = {"sub_files": [self.Fake(mt, name) for mt, name in files],
                 "agent_labels": {}}
         return [row["label"] for row
+                in crabd.StateBuilder._subagent_detail(info, running, self.NOW, stops)
+                if row["state"] == "working"]
+
+    def listed(self, files, running, stops):
+        info = {"sub_files": [self.Fake(mt, name) for mt, name in files],
+                "agent_labels": {}}
+        return [(row["label"], row["state"]) for row
                 in crabd.StateBuilder._subagent_detail(info, running, self.NOW, stops)]
 
     def test_the_stopped_agent_is_not_the_one_named(self):
@@ -9656,8 +9675,21 @@ class SubagentDetailNamesOnlyRunningAgentsTests(unittest.TestCase):
                         1, (self.NOW - 3, self.NOW - 1)),
             ["running"])
 
-    def test_nothing_running_shows_nothing(self):
+    def test_the_two_retired_files_are_listed_as_done_behind_the_running_one(self):
+        self.assertEqual(
+            self.listed([(self.NOW - 80, "running"), (self.NOW - 3, "stopped-b"),
+                         (self.NOW - 1, "stopped-a")],
+                        1, (self.NOW - 3, self.NOW - 1)),
+            [("running", "working"), ("stopped-a", "done"), ("stopped-b", "done")])
+
+    def test_nothing_running_names_nothing_as_running(self):
         self.assertEqual(self.detail([(self.NOW - 1, "stopped")], 0, (self.NOW - 1,)), [])
+
+    def test_but_the_stopped_lane_is_still_LISTED(self):
+        """SUB-a, and the whole point of it: before this, a session whose subagents had
+        all finished showed nothing at all on the panel."""
+        self.assertEqual(self.listed([(self.NOW - 1, "stopped")], 0, (self.NOW - 1,)),
+                         [("stopped", "done")])
 
 
 class QueuedContinueReplacementSurvivesTests(unittest.TestCase):
@@ -11858,3 +11890,99 @@ class OpenCodeThroughTheBuilderTests(OpenCodeTempDb):
         """Additive: a `client` member and one new top-level block, both feature-detected
         by presence. An older widget ignores unknown keys and keeps working."""
         self.assertEqual(self.build()["schema"], 5)
+
+
+class SubagentsLingerAfterTheyFinishTests(TempProjects):
+    """SUB-a. A finished subagent stays on the list for a few minutes, marked done.
+
+    THE GAP, operator-reported 2026-09-11. `subagentDetail` carried RUNNING subagents
+    only, and the `N sub` badge was gated on `running > 0` - so a session that launched
+    eleven subagents and finished them showed, on the panel, nothing at all. Measured on
+    the operator's own feed at the time: `running=0 total=11 detail=0`, with `total` on
+    the wire and no element rendering it.
+
+    WHAT A SUBAGENT CANNOT HAVE, and it bounds this whole feature: its transcript is
+    attributed to the PARENT's session id (TranscriptStore yields `entry.name`), so a
+    subagent has no id, no hook channel and therefore no `needs_input`. Its only
+    observable states are "its file moved recently" and "it stopped".
+    """
+
+    SID = "33333333-0000-0000-0000-000000000009"
+
+    def _sub(self, now, agent_id, age, text="a subagent brief"):
+        path = (self.projects / "C--IT" / self.SID / "subagents" /
+                f"agent-{agent_id}.jsonl")
+        write_jsonl(path, [user_line(text, now - age)], mtime=now - age)
+
+    def detail(self, now):
+        write_jsonl(self.session_path(self.SID), [user_line("go", now - 300)],
+                    mtime=now - 5)
+        _, state = self.build(now=now)
+        row = next(r for r in state["sessions"] if r["id"] == self.SID)
+        return row["subagentDetail"], row["subagents"]
+
+    def test_a_finished_subagent_is_still_listed_and_says_so(self):
+        now = time.time()
+        self._sub(now, "aaa", crabd.SUBAGENT_ACTIVE_SEC + 30, text="the finished lane")
+        detail, _ = self.detail(now)
+        self.assertEqual(len(detail), 1)
+        self.assertEqual(detail[0]["state"], "done")
+
+    def test_a_running_subagent_says_working(self):
+        now = time.time()
+        self._sub(now, "aaa", 5, text="the live lane")
+        detail, _ = self.detail(now)
+        self.assertEqual(detail[0]["state"], "working")
+
+    def test_running_subagents_sort_ahead_of_finished_ones(self):
+        """The list is read top-down on a small sheet, and what is still running is what
+        the operator is waiting on. A finished lane must never push a live one off the
+        cap."""
+        now = time.time()
+        self._sub(now, "old", crabd.SUBAGENT_ACTIVE_SEC + 30, text="done lane")
+        self._sub(now, "live", 5, text="live lane")
+        detail, _ = self.detail(now)
+        self.assertEqual([d["state"] for d in detail], ["working", "done"])
+
+    def test_a_subagent_quiet_past_the_keep_window_is_gone(self):
+        """"A few minutes" is the whole retention rule. Past it the lane is history, and
+        history is what the day timeline is for."""
+        now = time.time()
+        self._sub(now, "ancient", crabd.SUBAGENT_DONE_KEEP_SEC + 60)
+        detail, _ = self.detail(now)
+        self.assertEqual(detail, [])
+
+    def test_the_total_still_counts_every_subagent_ever_launched(self):
+        """`total` is the launch count and is NOT windowed - it is the denominator the
+        badge reads, and a shrinking denominator would make the badge count backwards."""
+        now = time.time()
+        self._sub(now, "a", 5)
+        self._sub(now, "b", crabd.SUBAGENT_ACTIVE_SEC + 30)
+        self._sub(now, "c", crabd.SUBAGENT_DONE_KEEP_SEC + 600)
+        detail, subs = self.detail(now)
+        self.assertEqual(subs["total"], 3)
+        self.assertEqual(subs["running"], 1)
+        self.assertEqual(len(detail), 2)     # the ancient one is off the list
+
+    def test_the_list_is_still_capped(self):
+        now = time.time()
+        for i in range(crabd.SUBAGENT_DETAIL_CAP + 4):
+            self._sub(now, f"a{i}", 5 + i)
+        detail, _ = self.detail(now)
+        self.assertLessEqual(len(detail), crabd.SUBAGENT_DETAIL_CAP)
+
+    def test_a_stopped_subagent_reads_done_even_with_a_fresh_file(self):
+        """CD-29's evidence, reused. A subagent that just stopped has the NEWEST mtime of
+        all of them - its final record is the last thing written - so freshness alone
+        cannot tell running from just-finished. A matched SubagentStop can."""
+        now = time.time()
+        self._sub(now, "aaa", 2, text="just stopped")
+        hooks = crabd.HookTracker()
+        hooks.record({"session_id": self.SID, "hook_event_name": "SubagentStop",
+                      "cwd": "C:\\IT"})
+        write_jsonl(self.session_path(self.SID), [user_line("go", now - 300)],
+                    mtime=now - 5)
+        _, state = self.build(now=now, hooks=hooks)
+        row = next(r for r in state["sessions"] if r["id"] == self.SID)
+        self.assertEqual([d["state"] for d in row["subagentDetail"]], ["done"])
+        self.assertEqual(row["subagents"]["running"], 0)

@@ -2829,7 +2829,16 @@ function renderSessions(sessions, status, quiet, recap) {
 			   delivered until something else rebuilt it. The LABEL, not the raw
 			   prompt: two prompts that render the same chip are the same card. */
 			queuedLabel(s) || '',
-			subList(s).map(function (d) { return String(d && d.label); }).join(',')].join('');
+			/* SUB-a: the label ALONE is no longer the row's identity. A lane that goes
+			   working -> done changes that row's styling and the badge beside it while
+			   every label stays put, so without the state in here the card would keep
+			   drawing a finished lane as running until something else rebuilt it. The
+			   badge TEXT rides along for the same reason: its denominator moves when a
+			   new lane is launched, and `running` alone never saw that. */
+			(subBadgeText(s) || ''),
+			cardSubList(s).map(function (d) {
+				return String(d && d.label) + ':' + subRowState(d);
+			}).join(',')].join('');
 	}).join('') + '||' + (chipText || '') + '||' + (quiet ? 'q' : '');
 
 	/* A REBUILD IS DEFERRED WHILE A FINGER IS ON A CARD (v0.14.0). The grid rebuilds
@@ -3018,6 +3027,58 @@ function topRepo(recap) {
 		if (!best || c.count > best.count) best = { repo: String(c.repo), count: c.count };
 	}
 	return best;
+}
+
+/* SUB-b. At most this many lanes on a CARD. Three, matching what fits the taller
+   cell without a fourth pushing the badges out of it - the sheet carries the rest. */
+var CARD_SUB_ROWS_MAX = 3;
+
+/* SUB-b. The lanes a CARD lists: the RUNNING ones, capped.
+
+   Deliberately not the same list the sheet gets. A card is read from across the room
+   to answer "what is happening right now", and a lane that finished four minutes ago
+   is not an answer to that - it is context, and context is what the tap is for. The
+   badge still reports the finished ones in its denominator, so nothing is hidden;
+   what changes is which question each surface answers. */
+function cardSubList(s) {
+	var out = [];
+	var list = subList(s);
+	for (var i = 0; i < list.length && out.length < CARD_SUB_ROWS_MAX; i++) {
+		if (subRowState(list[i]) === 'working') out.push(list[i]);
+	}
+	return out;
+}
+
+/* SUB-a. The subagent badge: LIVE over LAUNCHED, or null for no badge at all.
+
+   It used to be `running + ' sub'` gated on `running > 0`, and that is how a session
+   which launched eleven subagents and finished them came to show nothing whatsoever —
+   measured on the operator's feed: running 0, total 11, and the 11 rendered by no
+   element on the panel.
+
+   The denominator is the LAUNCH count and never shrinks. A badge whose total fell as
+   lanes aged off the list would count backwards, which is worse than not counting: the
+   operator would have to decide whether work had been undone. */
+function subBadgeText(s) {
+	var subs = s && s.subagents;
+	if (!subs || typeof subs !== 'object') return null;
+	var total = Number(subs.total);
+	if (!isFinite(total) || total <= 0) return null;
+	var running = Number(subs.running);
+	/* A missing running count reads as NONE running rather than as unknown: this
+	   number's only job is to say what is live right now, and "unknown" is not a
+	   thing the badge can draw. */
+	if (!isFinite(running) || running < 0) running = 0;
+	return running + '/' + total + ' sub';
+}
+
+/* SUB-a. A row's state, defaulting to `working`. A crabd older than SUB-a sends no
+   `state` member AND only ever listed running lanes, so on that feed the default is
+   not a guess — it is the truth. An unrecognised value falls back the same way rather
+   than styling a row as a state this build cannot draw. */
+function subRowState(d) {
+	var raw = d && d.state;
+	return raw === 'done' ? 'done' : 'working';
 }
 
 /* subagentDetail is optional and crabd caps it at 5 — defend against both a
@@ -3344,15 +3405,23 @@ function buildCard(s, quiet) {
 		badges.appendChild(makeBadge('ctx ' + fmtNum(s.contextTokens), 'badge-ctx'));
 	}
 	if (s.speed === 'fast') badges.appendChild(makeBadge('FAST', 'badge-fast'));
-	var running = s.subagents && Number(s.subagents.running);
-	if (isFinite(running) && running > 0) badges.appendChild(makeBadge(running + ' sub', 'badge-sub'));
+	var subBadge = subBadgeText(s);
+	if (subBadge) badges.appendChild(makeBadge(subBadge, 'badge-sub'));
 	if (acked) badges.appendChild(makeBadge('ACKED', 'badge-ack'));
 
 	bottom.appendChild(event);
 	/* Under the body, above the badges: the rows explain the "N sub" badge that
 	   sits directly beneath them. */
-	var subs = buildSubRows(subList(s), (question || pend) ? SUB_ROWS_MAX_Q : SUB_ROWS_MAX);
+	var cardLanes = cardSubList(s);
+	var subs = buildSubRows(cardLanes,
+		(question || pend) ? Math.min(SUB_ROWS_MAX_Q, CARD_SUB_ROWS_MAX)
+			: CARD_SUB_ROWS_MAX);
 	if (subs) bottom.appendChild(subs);
+	/* SUB-b: the hook the stylesheet needs to give THIS card the extra grid row.
+	   A class rather than a descendant selector on .card-subs, because the rule it
+	   drives is on the CARD's own grid placement and a parent cannot be selected
+	   from its child. */
+	if (cardLanes.length) card.classList.add('has-lanes');
 	/* The queued chip (v0.15.0), between the body and the badges. It is card
 	   STRUCTURE, not an age — it appears and disappears with the field — so it is
 	   in the signature and it is built here rather than filled by the tick.
@@ -3411,6 +3480,9 @@ function buildSubRows(list, cap) {
 	for (var i = 0; i < shown; i++) {
 		var row = document.createElement('div');
 		row.className = 'sub-row';
+		/* On the ELEMENT rather than in a class name, so the stylesheet can key on it
+		   the way the cards key on data-state - one idiom for "what state is this". */
+		row.setAttribute('data-sub-state', subRowState(list[i]));
 		var label = document.createElement('span');
 		label.className = 'sub-label';
 		label.textContent = (list[i] && list[i].label) ? String(list[i].label) : 'subagent';
@@ -3950,8 +4022,13 @@ function syncSheetMeta(s) {
    height stays a function of the cap and never of the feed. */
 function syncSheetSubs(s) {
 	var list = subList(s);
+	/* The STATE is part of the signature, not just the label (SUB-a): a lane finishing
+	   changes nothing about its label, and the sheet would go on drawing it as running
+	   for as long as it stayed open. */
 	var sig = sheetSessionId + '#' + list.length + '#' +
-		list.map(function (d) { return String(d && d.label); }).join('|');
+		list.map(function (d) {
+			return String(d && d.label) + ':' + subRowState(d);
+		}).join('|');
 	if (sig !== sheetSubSig) {
 		sheetSubSig = sig;
 		ui.sheetSubs.textContent = '';
