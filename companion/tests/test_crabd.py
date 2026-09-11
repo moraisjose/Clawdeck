@@ -3439,7 +3439,7 @@ class ActionEndpointTests(ServedOverASocket):
         are all additive and none moves it."""
         self.assertEqual(self.state()["schema"], 5)
         self.assertEqual(crabd.SCHEMA_BREAKING, 5)
-        self.assertEqual(crabd.VERSION, "0.31.1")
+        self.assertEqual(crabd.VERSION, "0.31.2")
 
     def test_the_v6_fields_ride_on_schema_5_in_the_served_document(self):
         """The compat contract in ONE test: the fields the deployed v0.5.0 widget has
@@ -6215,7 +6215,7 @@ class HistoryEndpointTests(ServedOverASocket):
 
     def test_state_and_health_are_untouched_by_the_new_route(self):
         self.assertIn("schema", self.state())
-        self.assertEqual(self.client.get("/v1/health").json()["version"], "0.31.1")
+        self.assertEqual(self.client.get("/v1/health").json()["version"], "0.31.2")
 
     def test_the_endpoint_does_not_write_to_the_history_file(self):
         """Read-only by contract. A GET that touched the file would also invalidate its
@@ -11986,3 +11986,195 @@ class SubagentsLingerAfterTheyFinishTests(TempProjects):
         row = next(r for r in state["sessions"] if r["id"] == self.SID)
         self.assertEqual([d["state"] for d in row["subagentDetail"]], ["done"])
         self.assertEqual(row["subagents"]["running"], 0)
+
+
+class RunningLanesAreCountedNotGuessedTests(unittest.TestCase):
+    """SUB-c. `running` is starts minus stops, when the starts are being told to us.
+
+    THE GAP, reported 2026-09-11 on a 34-lane dispatcher: the card showed no lanes and
+    the badge read 0/34 while subagents were demonstrably running - a file written one
+    second earlier. `running` was `sub_active - len(stops)`: files touched in the last
+    90 s, minus a bare COUNT of recent SubagentStop hooks. On a dispatcher whose lanes
+    turn over every ~30 s (measured: stops at 09:57:02, 09:58:21, 09:58:50, 09:59:20,
+    09:59:34, 10:00:07, 10:00:08) that arithmetic sits at zero most of the time.
+
+    THE SIGNAL WAS ALWAYS THERE. Claude Code fires `SubagentStart` - 30 occurrences in
+    the shipped 2.1.268 binary, and the operator's own settings already routed it
+    elsewhere. crabd subscribed to the Stop and not the Start, so it was counting exits
+    against an estimate of entries instead of against the entries.
+
+    A BALANCE, not a window. Both halves are unbounded in time on purpose: a lane that
+    runs for an hour must still count, and any window would drop its start while it was
+    still going. The balance is floored at zero and reset by the events that end a
+    batch, so a missed stop cannot leak forever.
+    """
+
+    SID = "s1"
+
+    def setUp(self):
+        self.hooks = crabd.HookTracker()
+
+    def send(self, event, n=1):
+        for _ in range(n):
+            self.hooks.record({"session_id": self.SID, "hook_event_name": event,
+                               "cwd": "C:\\IT"})
+
+    def running(self):
+        return self.hooks.snapshot()[self.SID]["sub_running"]
+
+    def test_starts_and_stops_balance(self):
+        self.send("UserPromptSubmit")
+        self.send("SubagentStart", 3)
+        self.assertEqual(self.running(), 3)
+        self.send("SubagentStop", 2)
+        self.assertEqual(self.running(), 1)
+
+    def test_a_long_lived_lane_is_never_aged_out_of_the_count(self):
+        """The defect a window would reintroduce: a lane running for an hour."""
+        self.send("UserPromptSubmit")
+        self.send("SubagentStart")
+        row = self.hooks.sessions[self.SID]
+        row["at"] = time.time() - 3600
+        self.assertEqual(self.running(), 1)
+
+    def test_rapid_turnover_never_reads_as_idle(self):
+        """THE MEASURED SHAPE: a lane finishing every ~30 s while others keep running."""
+        self.send("UserPromptSubmit")
+        self.send("SubagentStart", 4)
+        for _ in range(6):
+            self.send("SubagentStop")
+            self.send("SubagentStart")
+            self.assertEqual(self.running(), 4)
+
+    def test_more_stops_than_starts_floors_at_zero(self):
+        self.send("UserPromptSubmit")
+        self.send("SubagentStart")
+        self.send("SubagentStop", 4)
+        self.assertEqual(self.running(), 0)
+
+    def test_a_new_turn_resets_the_balance(self):
+        """A missed stop - a crashed lane, a killed process - would otherwise leak a
+        phantom runner for the life of the session. A new prompt is a new batch."""
+        self.send("UserPromptSubmit")
+        self.send("SubagentStart", 3)
+        self.send("UserPromptSubmit")
+        self.assertEqual(self.running(), 0)
+
+    def test_a_finished_turn_resets_it_too(self):
+        self.send("UserPromptSubmit")
+        self.send("SubagentStart", 2)
+        self.send("Stop")
+        self.assertEqual(self.running(), 0)
+
+    def test_the_start_reaches_the_timeline(self):
+        self.send("SubagentStart")
+        self.assertEqual(self.hooks.snapshot()[self.SID]["events"][0]["text"],
+                         crabd.HookTracker.EVENT_TEXT["SubagentStart"])
+
+    def test_a_start_does_not_move_the_state_machine(self):
+        """Same rule SubagentStop has always followed: a lane opening says nothing new
+        about the SESSION, which is already working by virtue of having launched it."""
+        self.send("UserPromptSubmit")
+        state = self.hooks.snapshot()[self.SID]["state"]
+        since = self.hooks.snapshot()[self.SID]["since"]
+        self.send("SubagentStart")
+        self.assertEqual(self.hooks.snapshot()[self.SID]["state"], state)
+        self.assertEqual(self.hooks.snapshot()[self.SID]["since"], since)
+
+
+class RunningFallsBackToFilesWithoutTheStartHookTests(TempProjects):
+    """SUB-c, the other half. The shipped installer does not add SubagentStart, and an
+    operator who has not re-run it must not lose the count they had.
+
+    A session crabd has seen NO start for keeps the old file-and-stop estimate. The
+    balance takes over only once a start has actually arrived for that session, which
+    is also what makes the upgrade seamless mid-session: the estimate answers until the
+    first start, and the exact count from then on.
+    """
+
+    SID = "55555555-0000-0000-0000-00000000000b"
+
+    def _sub(self, now, agent_id, age):
+        write_jsonl(self.projects / "C--IT" / self.SID / "subagents" /
+                    f"agent-{agent_id}.jsonl",
+                    [user_line("brief", now - age)], mtime=now - age)
+
+    def test_no_start_hook_keeps_the_file_estimate(self):
+        now = time.time()
+        self._sub(now, "a", 5)
+        self._sub(now, "b", 10)
+        write_jsonl(self.session_path(self.SID), [user_line("go", now - 300)],
+                    mtime=now - 5)
+        _, state = self.build(now=now)
+        row = next(r for r in state["sessions"] if r["id"] == self.SID)
+        self.assertEqual(row["subagents"]["running"], 2)
+
+    def test_one_start_switches_that_session_to_the_exact_count(self):
+        now = time.time()
+        self._sub(now, "a", 5)
+        self._sub(now, "b", 10)
+        hooks = crabd.HookTracker()
+        hooks.record({"session_id": self.SID, "hook_event_name": "UserPromptSubmit",
+                      "cwd": "C:\\IT"})
+        hooks.record({"session_id": self.SID, "hook_event_name": "SubagentStart",
+                      "cwd": "C:\\IT"})
+        write_jsonl(self.session_path(self.SID), [user_line("go", now - 300)],
+                    mtime=now - 5)
+        _, state = self.build(now=now, hooks=hooks)
+        row = next(r for r in state["sessions"] if r["id"] == self.SID)
+        self.assertEqual(row["subagents"]["running"], 1)
+
+
+class ASubagentStopReopensADoneSessionTests(unittest.TestCase):
+    """SUB-d. A `done` row that a SubagentStop lands on is not done.
+
+    MEASURED the same run: the parent's Stop fired at 09:55:10, its main transcript
+    stopped there, and its subagents kept working. _resolve reactivates a `done` only
+    when the transcript moves past `since + DONE_REACTIVATION_GRACE_SEC` (120 s), and
+    at the build in question the newest subagent write was 09:56:50 - twenty seconds
+    short. The card read `finished` on a session that was working.
+
+    That grace exists to stop a LATE WRITE reopening a finished session - an async
+    ai-title, a straggler flush - and it should stay. But a SubagentStop is not a late
+    write: it is a Task returning INTO the parent's loop, which is the same evidence
+    DISPATCH-a already trusts to stand a false alert down. A hook, not an mtime.
+    """
+
+    NOW = 10000.0
+
+    def resolve(self, stops, since_ago=60.0, transcript_ago=30.0):
+        """`transcript_ago` is FRESH by default, and that is the measured shape: the
+        activity clock is a max over every file of the session INCLUDING its subagent
+        transcripts, so a lane that is writing keeps it moving while the parent's own
+        main transcript sits still. A quiet transcript is its own case, below."""
+        hook = {"state": "done", "since": self.NOW - since_ago,
+                "stops": [self.NOW - s for s in stops]}
+        return crabd.StateBuilder._resolve(
+            hook, self.NOW - transcript_ago, self.NOW - transcript_ago, self.NOW)[0]
+
+    def test_the_grace_still_guards_the_transcript_path(self):
+        """The rule SUB-d must not have loosened: a late write inside the grace, with no
+        stop beside it, still leaves a finished session finished."""
+        self.assertEqual(self.resolve(stops=(), since_ago=60.0, transcript_ago=30.0),
+                         "done")
+
+    def test_a_done_session_with_no_stops_stays_done(self):
+        self.assertEqual(self.resolve(stops=()), "done")
+
+    def test_a_stop_after_the_finish_reopens_it(self):
+        """THE FINDING: the turn ended, and then a Task came back."""
+        self.assertEqual(self.resolve(stops=(30.0,), since_ago=60.0), "working")
+
+    def test_a_stop_from_BEFORE_the_finish_leaves_it_done(self):
+        """The subagents a turn used while it ran are not evidence it resumed - every
+        finished dispatcher has a pile of them."""
+        self.assertEqual(self.resolve(stops=(90.0,), since_ago=60.0), "done")
+
+    def test_the_reopened_row_still_ages_on_its_own_transcript(self):
+        """Reopening is not pinning: the row falls into the aging block like any other,
+        so a session whose subagent stopped an hour ago is idle, not working."""
+        hook = {"state": "done", "since": self.NOW - 4000,
+                "stops": [self.NOW - 3000]}
+        old = self.NOW - (crabd.IDLE_AFTER_SEC + 120)
+        self.assertEqual(
+            crabd.StateBuilder._resolve(hook, old, old, self.NOW)[0], "idle")

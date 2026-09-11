@@ -3,10 +3,10 @@
 `settings-hooks-fragment.json` is the `hooks` object merged into `~/.claude/settings.json`
 by `setup/Install-SideCrab.ps1`. It carries two kinds of entry.
 
-## The five fire-and-forget `command` hooks
+## The six fire-and-forget `command` hooks
 
-`SessionStart`, `UserPromptSubmit`, `Notification`, `SubagentStop`, `SessionEnd` each pipe
-the hook JSON that Claude Code puts on stdin straight to crabd:
+`SessionStart`, `UserPromptSubmit`, `Notification`, `SubagentStart`, `SubagentStop`,
+`SessionEnd` each pipe the hook JSON that Claude Code puts on stdin straight to crabd:
 
 ```
 curl.exe -s -m 2 -X POST --data-binary @- http://127.0.0.1:2722/v1/hook || exit 0
@@ -18,6 +18,14 @@ curl.exe -s -m 2 -X POST --data-binary @- http://127.0.0.1:2722/v1/hook || exit 
   in Claude Code. `exit 0` behaves the same under `cmd.exe` and any POSIX shell.
 - `--data-binary @-` streams stdin. curl buffers it and sends `Content-Length`, but
   crabd accepts chunked framing too.
+
+**`SubagentStart` joined in crabd 0.31.2 (SUB-c).** Without it `running` was an ESTIMATE -
+subagent files touched in the last 90 s minus a bare count of recent `SubagentStop`s - and on
+a dispatcher whose lanes turn over every ~30 s that arithmetic sits at zero: measured, a badge
+reading `0/34` on a session with a subagent file written one second earlier. With both halves
+crabd keeps an exact balance instead. It is fire-and-forget like the rest and moves no state:
+a lane opening says nothing new about the SESSION, which is already working by virtue of
+having launched it. An operator who does not add it keeps the old estimate and loses nothing.
 
 **No `PreToolUse`/`PostToolUse`, deliberately (v0.19.0).** They were the obvious way to tell the
 panel a session is alive again after the operator answers a permission dialog in the app — and they

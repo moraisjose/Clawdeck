@@ -14,6 +14,69 @@
 > The "Schema 6" section below is retitled in place: its FIELDS are unchanged and live; only
 > the schema NUMBER they ride on is now 5.
 
+## v0.31.2 (2026-09-11 — BEHAVIOUR + a NEW HOOK SUBSCRIPTION; schema stays 5)
+
+crabd `VERSION` → `0.31.2`. Two defects reported together, one cause each, and one of them is
+crabd listening to half a signal.
+
+### 1. SUB-c — `running` was estimated when it could have been counted
+
+Reported: the card showed no lanes and the badge read `0/34` on a dispatcher with a subagent file
+written **one second** earlier.
+
+`running` was `sub_active - len(stops)` — files touched in the last 90 s, minus a bare **count** of
+recent `SubagentStop` hooks. On a dispatcher whose lanes turn over every ~30 s that arithmetic sits
+at zero most of the time. Measured stops on the reporting run: 09:57:02, 09:58:21, 09:58:50,
+09:59:20, 09:59:34, 10:00:07, 10:00:08.
+
+Everything the operator saw followed from that zero: the served list trims to `running`, so the live
+lane was handed to the finished half; the card's running list was empty, so it grew no rows; and the
+badge reported a working session as `0/34`.
+
+**crabd now subscribes to `SubagentStart`.** It is a real hook event — 30 occurrences in the shipped
+`claude` 2.1.268 — and the operator's settings already routed it elsewhere. crabd had subscribed to
+the exit and not the entry, and was therefore counting exits against an *estimate* of entries.
+
+`running` is a **balance**: `+1` per start, `-1` per stop, floored at zero. Both halves are
+unbounded in time deliberately — a lane that runs for an hour must still count, and any window
+would drop its start while it was still going. `UserPromptSubmit`, `Stop` and `SessionEnd` each
+zero it, because each ends a batch and a balance has to be closed by something: one missed stop (a
+crashed lane, a killed process) would otherwise leak a phantom runner for the session's life.
+
+**The estimate stays as the fallback.** A session crabd has seen no start for keeps the old
+file-and-stop arithmetic — the shipped installer does not add that hook, and an operator who has not
+re-run it must lose nothing. It also makes the upgrade seamless mid-session: the estimate answers
+until the first start arrives, the balance from then on.
+
+The count stays authoritative over the list. Files supply *names*, never the number: a dispatcher
+writes faster than it stops, so there are routinely more fresh files than live lanes, and naming
+more runners than the badge counts is the one disagreement the panel must never show.
+
+### 2. SUB-d — a `done` card on a session whose subagents were working
+
+Measured on the same run: the parent's `Stop` fired at 09:55:10 and its main transcript stopped
+there while its subagents kept going. `_resolve` reactivates a `done` only when the transcript moves
+past `since + DONE_REACTIVATION_GRACE_SEC` (120 s), and the newest subagent write was 09:56:50 —
+**twenty seconds short**. The card read `finished` on a session that was working.
+
+A `SubagentStop` **after** `since` now reopens the row, with no grace at all. The grace exists to
+stop a *late write* reopening a finished session (an async `ai-title`, a straggler flush) and it
+stays for that path. A `SubagentStop` is not a late write: it is a Task returning **into the
+parent's loop**, the same evidence v0.30.1 already trusts to stand a false alert down — a hook
+rather than an mtime, so it needs no grace to absorb two clocks.
+
+Stops from *before* the finish are ignored. Every finished dispatcher has a pile of them, and
+reading those as a resumption would mean no dispatcher could ever be `done`.
+
+Reopening is not pinning: the row falls through to the aging block like any other, so a session
+whose last lane stopped an hour ago is `idle`, not `working`.
+
+### 3. Operator action
+
+`SubagentStart` must be added to `~/.claude/settings.json` for the exact count to apply — the same
+fire-and-forget `curl` the other five ingest hooks use. Without it nothing breaks and nothing
+changes: the fallback estimate is what the panel has always shown.
+
 ## v0.31.1 (2026-09-11 — ADDITIVE: `subagentDetail[].state`; schema stays 5)
 
 crabd `VERSION` → `0.31.1`. One additive member per subagent row, and a widening of what

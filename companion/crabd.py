@@ -76,7 +76,7 @@ from pathlib import Path, PureWindowsPath
 # does NOT - the .icuewidget import is a double-click at the iCUE console - so shipping
 # schema N+1 dead-feeds the on-glass panel until someone stands at the desk.
 SCHEMA_BREAKING = 5
-VERSION = "0.31.1"
+VERSION = "0.31.2"
 
 HOST = "127.0.0.1"
 # 2722 is the production port and the Scheduled Task owns it. CRABD_PORT exists so a
@@ -2736,6 +2736,7 @@ class HookTracker:
         "UserPromptSubmit": "prompt submitted",
         "Notification": "asked a question",
         "Stop": "turn finished",
+        "SubagentStart": "subagent started",
         "SubagentStop": "subagent finished",
         "SessionEnd": "session ended",
     }
@@ -2790,6 +2791,12 @@ class HookTracker:
     def _blank(now: float) -> dict:
         return {"state": None, "since": now, "last_event": None, "at": now,
                 "cwd": None, "stops": [], "subagent_stops": 0,
+                # SUB-c. The live lane BALANCE: +1 per SubagentStart, -1 per
+                # SubagentStop, floored at 0. `sub_starts_seen` is what makes the
+                # upgrade seamless - until a start actually arrives for this session
+                # the builder keeps its old file-based estimate, so an operator who has
+                # not re-run the installer loses nothing.
+                "sub_running": 0, "sub_starts_seen": False,
                 "question": None, "turn_started": None, "acked": False,
                 # v0.20.0, INTERNAL - never served. True only while this row's
                 # `needs_input` is one the PermissionRequest hook raised and nothing else
@@ -2852,9 +2859,20 @@ class HookTracker:
             if idle_nudge:
                 return
 
+            if event == "SubagentStart":
+                # Deliberately BEFORE the state map and returning here, exactly as
+                # SubagentStop does: a lane opening says nothing new about the SESSION,
+                # which is already working by virtue of having launched it.
+                row["sub_starts_seen"] = True
+                row["sub_running"] += 1
+                return
+
             if event == "SubagentStop":
                 row["stops"].append(now)
                 row["subagent_stops"] += 1
+                # Floored, not asserted: a stop crabd sees without the start that
+                # preceded it (it was restarted mid-batch) must not drive this negative.
+                row["sub_running"] = max(0, row["sub_running"] - 1)
                 # DISPATCH-a. A Task returning into the parent's loop is the parent
                 # advancing, so an idle-Notification alert older than the grace was a
                 # false positive. Written back as a real transition for note_activity's
@@ -2898,6 +2916,11 @@ class HookTracker:
                 row["turn_started"] = now
             elif event in ("Stop", "SessionEnd"):
                 row["turn_started"] = None
+            # SUB-c. A BALANCE has to be closed by something, or one missed stop - a
+            # crashed lane, a killed process - leaks a phantom runner for the life of
+            # the session. These three each end a batch, so each zeroes it.
+            if event in ("UserPromptSubmit", "Stop", "SessionEnd"):
+                row["sub_running"] = 0
             # v0.20.0. A re-fired Notification on a card that is ALREADY `needs_input`
             # used to move nothing: `row["state"] != state` was false, so `since` stayed
             # on the FIRST question and `acked` stayed set. A second, DIFFERENT question
@@ -6058,9 +6081,26 @@ class StateBuilder:
                 continue
             cwd = info["cwd"] or (hook.get("cwd") if hook else None)
             repo, branch = self.git.get(cwd)
-            running = info["sub_active"]
-            if hook:
-                running = max(0, running - len(hook["stops"]))
+            # SUB-c. COUNTED when Claude Code is telling us, ESTIMATED when it is not.
+            #
+            # The estimate - active files minus a bare count of recent stops - is what
+            # the panel always used, and on a dispatcher whose lanes turn over every
+            # ~30 s it sits at zero most of the time: measured on a 34-lane run, a
+            # subagent file written one second earlier and a badge reading 0/34.
+            # SubagentStart makes it exact, and it was always available (30 occurrences
+            # in the shipped 2.1.268 binary) - crabd simply subscribed to the exit and
+            # not the entry.
+            #
+            # The estimate stays for every session no start has arrived for: the shipped
+            # installer does not add that hook, and an operator who has not re-run it
+            # must not lose the count they had. It also makes the upgrade seamless
+            # mid-session - the estimate answers until the first start, the balance from
+            # then on.
+            lane_stops = (hook or {}).get("stops") or ()
+            if hook and hook.get("sub_starts_seen"):
+                running = hook.get("sub_running") or 0
+            else:
+                running = max(0, info["sub_active"] - len(lane_stops))
             turn_started = (hook or {}).get("turn_started")
             # The cwd tier runs on the RESOLVED cwd (transcript, else the hook payload),
             # not on facts.last_cwd: a session whose transcript has not been parsed yet
@@ -6099,7 +6139,7 @@ class StateBuilder:
                                   else None),
                 "acked": bool((hook or {}).get("acked")),
                 "subagentDetail": self._subagent_detail(
-                    info, running, now, (hook or {}).get("stops") or ()),
+                    info, running, now, lane_stops),
                 "events": list((hook or {}).get("events") or []),
                 # Subagent files are excluded upstream: a subagent's usage record
                 # describes ITS window, not the one the operator is watching fill.
@@ -6290,30 +6330,24 @@ class StateBuilder:
         return question
 
     @staticmethod
-    def _subagent_detail(info, running: int, now: float, stops=()) -> list:
-        """Running subagents only, newest first, capped. Trimmed to `running` so the
-        badge count and the list can never disagree on the panel.
+    def _partition_lanes(info, now: float, stops=(), running=None):
+        """-> (live, done). THE one answer to "which lanes are running", read by the
+        served count AND by the served list, so the two cannot disagree.
 
-        CD-29 (v0.21.0): the STOPPED files are removed before the trim, not merely
-        counted out of it. `running` was already `sub_active - len(stops)`, so the count
-        was right - but the list was the newest `running` files by mtime, and a subagent
-        that just stopped has the NEWEST mtime of all of them (its final record is the
-        last thing written). So the one agent crabd knew had finished was the one the
-        panel named as running, and a genuinely running older sibling was the one
-        dropped. Reproduced 2026-08-27 with two subagents and one SubagentStop.
+        SUB-c. `running` used to be `sub_active - len(stops)` while the list matched
+        each stop to a file (CD-29). MEASURED on a 34-lane dispatcher 2026-09-11: one
+        file written 1 s earlier, two stops inside the 90 s window belonging to lanes
+        whose files were already 8+ minutes old. The blunt subtraction gave 0, and
+        everything downstream followed - the live lane was re-labelled done, the card
+        grew no rows, the badge read 0/34 on a session that was working.
 
-        A SubagentStop payload does not identify WHICH subagent stopped - `stops` is a
-        list of times, which is all the tracker keeps - so each stop claims the file
-        whose last write is nearest to it and not meaningfully after it
-        (SUBAGENT_STOP_MATCH_SEC). That is a match on the only evidence there is, and
-        it degrades safely: a stop that matches nothing leaves the trim to `running` as
-        the backstop, exactly as before.
+        A stop whose lane has ALREADY aged out of the active window must not be
+        subtracted again: that file expired on its own and its exit is already counted.
+        Matching is what tells those apart, and it was here all along - on one side of
+        the pair only.
         """
         candidates = list(info["sub_files"])
-        # SUB-a: `stopped` is no longer a discard pile. A lane a SubagentStop claimed is
-        # the one thing crabd KNOWS has finished, and that is exactly what the operator
-        # wants to still see for a few minutes - so it is moved across, not dropped.
-        stopped = []
+        done = []
         for stop in sorted(stops):
             claimed = None
             for facts in candidates:
@@ -6323,29 +6357,44 @@ class StateBuilder:
                     claimed = facts
             if claimed is not None:
                 candidates.remove(claimed)
-                stopped.append(claimed)
-
-        # Two evidences of "finished", and both are needed. A matched SubagentStop is the
-        # certain one; going quiet past SUBAGENT_ACTIVE_SEC is the one that covers every
-        # lane no stop was seen for - a crabd that started mid-run, a hook that never
-        # fired. Whatever is left over is running.
-        live, done = [], list(stopped)
+                done.append(claimed)
+        live = []
         for facts in candidates:
             (live if now - facts.mtime <= SUBAGENT_ACTIVE_SEC else done).append(facts)
-        # `running` is the badge's numerator and it is computed upstream, so the LIVE half
-        # is trimmed to it rather than allowed to disagree - the panel must never name
-        # more lanes as running than the badge counts. The surplus is finished by the
-        # badge's own reckoning, so it moves across rather than disappearing.
         live.sort(key=lambda f: f.mtime, reverse=True)
-        if running >= 0 and len(live) > running:
-            done.extend(live[running:])
-            live = live[:running]
+        # The COUNT is authoritative and the files only supply NAMES. A dispatcher
+        # writes faster than it stops, so there are routinely more fresh files than
+        # live lanes; naming more runners than the badge counts is the one disagreement
+        # the panel must never show. The surplus is finished by the count's own
+        # reckoning, so it moves across rather than disappearing.
+        if running is not None and len(live) > max(0, running):
+            done.extend(live[max(0, running):])
+            live = live[:max(0, running)]
         done.sort(key=lambda f: f.mtime, reverse=True)
+        return live, done
 
+    @staticmethod
+    def _subagent_detail(info, running, now: float, stops=()) -> list:
+        """The lanes a card names, newest first inside each half, capped.
+
+        CD-29 (v0.21.0) is why stops are MATCHED rather than counted. A SubagentStop
+        payload does not identify WHICH subagent stopped - `stops` is a list of times,
+        which is all the tracker keeps - so each stop claims the file whose last write
+        is nearest to it and not meaningfully after it (SUBAGENT_STOP_MATCH_SEC). A
+        subagent that just stopped has the NEWEST mtime of all of them (its final record
+        is the last thing written), so without the match the one lane crabd KNEW had
+        finished was the one it named as running. Reproduced 2026-08-27.
+
+        SUB-a: a claimed lane is no longer discarded. It is the one thing crabd knows
+        has finished, which is exactly what the operator wants to still see for a few
+        minutes, so it moves to the finished half rather than off the list.
+
+        RUNNING FIRST, always. The list is read top-down and what is still running is
+        what the operator is waiting on; a finished lane must never push a live one off
+        the cap.
+        """
+        live, done = StateBuilder._partition_lanes(info, now, stops, running)
         detail = []
-        # RUNNING FIRST, always. The sheet is read top-down and what is still running is
-        # what the operator is waiting on; a finished lane must never push a live one off
-        # the cap.
         for facts, state in ([(f, "working") for f in live] +
                              [(f, "done") for f in done])[:SUBAGENT_DETAIL_CAP]:
             agent_id = facts.agent_id()
@@ -6374,13 +6423,32 @@ class StateBuilder:
         if state == "needs_input":
             return "needs_input", since
         if state == "done":
+            # SUB-d. A SubagentStop AFTER the finish reopens it, with no grace at all.
+            #
+            # MEASURED 2026-09-11: a dispatcher's Stop fired at 09:55:10, its main
+            # transcript stopped there, and its subagents kept working. The transcript
+            # rule below needs a write past `since` + 120 s and the newest subagent
+            # write was 09:56:50 - twenty seconds short - so the card read `finished` on
+            # a session that was working.
+            #
+            # The grace exists to stop a LATE WRITE reopening a finished session (an
+            # async ai-title, a straggler flush) and it stays. A SubagentStop is not a
+            # late write: it is a Task returning INTO the parent's loop, which is the
+            # same evidence DISPATCH-a already trusts to stand a false alert down. A
+            # hook, not an mtime - so it needs no grace to absorb two clocks.
+            #
+            # Stops from BEFORE the finish are not evidence: every finished dispatcher
+            # has a pile of them, and reading those as a resumption would mean no
+            # dispatcher could ever be done.
+            if any(stop > since for stop in (hook.get("stops") or ()) if hook):
+                state = None
             # "unless reactivated": a transcript write past the grace means work resumed
             # without the hooks saying so. v0.28.2: the reactivated row FALLS THROUGH to
             # the aging block instead of returning unaged `working` - the early return
             # made one late write (an async ai-title, a subagent straggler) a PERMANENT
             # working zombie, re-derived on every build until the 2h prune. Measured
             # live 2026-09-01: a finished session read `working · quiet 33m`.
-            if transcript_mtime > since + DONE_REACTIVATION_GRACE_SEC:
+            elif transcript_mtime > since + DONE_REACTIVATION_GRACE_SEC:
                 state = None   # the aging block below keys on last_activity, which
                                # already carries the transcript's own clock
             elif now - since > DONE_DROP_SEC:
